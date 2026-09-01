@@ -197,3 +197,40 @@ function allMonthsSorted(...maps) {
   maps.forEach(m => Object.keys(m).forEach(k => keys.add(k)));
   return [...keys].sort((a, b) => monthSortKey(a) - monthSortKey(b));
 }
+
+/**
+ * Detect the filing-period month label for a raw (unparsed) GSTR JSON file,
+ * without running the full aggregation. Used at upload time to group files
+ * and catch duplicate-month uploads early.
+ * @param {'r1'|'2b'|'3b'} type
+ * @param {Object} data - raw parsed JSON
+ * @returns {string} month label, or 'Unknown'
+ */
+function detectMonth(type, data) {
+  let period = '';
+  if (type === 'r1') {
+    period = data.fp || '';
+  } else if (type === '2b') {
+    const inner = data.data || data;
+    period = inner.rtnprd || inner.retPrd || data.rtnprd || data.retPrd || '';
+  } else if (type === '3b') {
+    const inner = data.data || data;
+    period = inner.fp || inner.ret_period || data.fp || data.ret_period || '';
+  }
+  return retPeriodToLabel(period);
+}
+
+/**
+ * Merge a set of raw files (one per month, keyed by month label) for a single
+ * return type into one month-keyed totals map, using the given per-file parser.
+ * @param {Object.<string,{name:string,data:Object}>} monthEntries
+ * @param {Function} parserFn - parseGSTR1 | parseGSTR2B | parseGSTR3B
+ * @returns {Object}
+ */
+function mergeParsedFiles(monthEntries, parserFn) {
+  const agg = {};
+  Object.values(monthEntries).forEach(entry => {
+    Object.assign(agg, parserFn(entry.data));
+  });
+  return agg;
+}

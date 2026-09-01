@@ -10,46 +10,66 @@
 
 <header>
   <div class="logo-mark">G</div>
-  <h1>GST Reconciliation <span>FY 2025-26</span></h1>
+  <h1>GST Reconciliation <span>FY 2025-26 · up to 12 months</span></h1>
 </header>
 
 <main>
   <!-- Upload -->
   <div class="upload-grid">
     <div class="upload-card" id="card-r1">
-      <input type="file" accept=".json" id="file-r1">
-      <div class="up-icon">📄</div>
+      <div class="up-top">
+        <div class="up-icon">📄</div>
+        <span class="up-count" id="count-r1">0/12</span>
+      </div>
       <div class="up-label">GSTR-1</div>
-      <div class="up-sub">Outward supplies JSON</div>
-      <div class="up-filename" id="fn-r1"></div>
+      <div class="up-sub">Outward supplies JSON — select up to 12 monthly files</div>
+      <label class="up-add" for="file-r1">
+        <input type="file" accept=".json" id="file-r1" multiple>
+        + Add files
+      </label>
+      <div class="chips" id="chips-r1"></div>
     </div>
+
     <div class="upload-card" id="card-2b">
-      <input type="file" accept=".json" id="file-2b">
-      <div class="up-icon">📄</div>
+      <div class="up-top">
+        <div class="up-icon">📄</div>
+        <span class="up-count" id="count-2b">0/12</span>
+      </div>
       <div class="up-label">GSTR-2B</div>
-      <div class="up-sub">ITC statement JSON</div>
-      <div class="up-filename" id="fn-2b"></div>
+      <div class="up-sub">ITC statement JSON — select up to 12 monthly files</div>
+      <label class="up-add" for="file-2b">
+        <input type="file" accept=".json" id="file-2b" multiple>
+        + Add files
+      </label>
+      <div class="chips" id="chips-2b"></div>
     </div>
+
     <div class="upload-card" id="card-3b">
-      <input type="file" accept=".json" id="file-3b">
-      <div class="up-icon">📄</div>
+      <div class="up-top">
+        <div class="up-icon">📄</div>
+        <span class="up-count" id="count-3b">0/12</span>
+      </div>
       <div class="up-label">GSTR-3B</div>
-      <div class="up-sub">Summary return JSON</div>
-      <div class="up-filename" id="fn-3b"></div>
+      <div class="up-sub">Summary return JSON — select up to 12 monthly files</div>
+      <label class="up-add" for="file-3b">
+        <input type="file" accept=".json" id="file-3b" multiple>
+        + Add files
+      </label>
+      <div class="chips" id="chips-3b"></div>
     </div>
   </div>
+
+  <div id="notice-list" class="notice-list"></div>
 
   <div class="run-row">
     <button class="btn-run" id="btn-run" disabled>Run Reconciliation</button>
     <button class="btn-reset" id="btn-reset">Reset</button>
-    <span class="run-hint" id="run-hint">Upload all three files to proceed</span>
+    <span class="run-hint" id="run-hint">Add at least one file for each of GSTR-1, GSTR-2B, and GSTR-3B to proceed.</span>
   </div>
-
-  <div class="error-banner" id="error-banner"></div>
 
   <div id="placeholder">
     <div class="ph-icon">🧾</div>
-    <p>Upload GSTR-1, GSTR-2B, and GSTR-3B JSON files<br>to generate the reconciliation.</p>
+    <p>Upload GSTR-1, GSTR-2B, and GSTR-3B JSON files — up to 12 months each —<br>to generate a full-year reconciliation.</p>
   </div>
 
   <div id="results">

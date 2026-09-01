@@ -1,13 +1,14 @@
 # GST Reconciliation Tool
 
-A client-side web app for reconciling GSTR-1, GSTR-2B, and GSTR-3B returns. No data leaves your browser — everything is processed locally.
+A client-side web app for reconciling GSTR-1, GSTR-2B, and GSTR-3B returns across a full financial year. No data leaves your browser — everything is processed locally.
 
 ## Usage
 
 1. Open `index.html` in a browser (or serve with any static host).
-2. Upload your portal-downloaded JSON files for GSTR-1, GSTR-2B, and GSTR-3B.
-3. Click **Run Reconciliation**.
-4. Review the tables and download a CSV if needed.
+2. For each of GSTR-1, GSTR-2B, and GSTR-3B, add up to 12 portal-downloaded monthly JSON files (multi-select is supported). Each card shows the months loaded as removable chips.
+3. Uploading a file for a month that's already loaded replaces the earlier one — a warning banner confirms which file was replaced.
+4. Click **Run Reconciliation** once at least one file is loaded for all three return types (a full 12 months isn't required to run).
+5. Review the tables and download a CSV if needed.
 
 ## What it reconciles
 
