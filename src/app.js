@@ -138,44 +138,6 @@ function runRecon() {
   }
 }
 
-// ── CSV export ─────────────────────────────────────────────────────────────
-
-function downloadCSV() {
-  if (!reconData) return;
-  const { g1, g2b, g3b, months } = reconData;
-
-  const headers = [
-    'Month',
-    'GSTR1 Taxable', 'GSTR1 CGST', 'GSTR1 SGST', 'GSTR1 IGST',
-    '3B Taxable',    '3B CGST',    '3B SGST',     '3B IGST',
-    '2B CGST',       '2B SGST',    '2B IGST',
-    '3B ITC CGST',   '3B ITC SGST','3B ITC IGST',
-  ];
-
-  const rows = [headers];
-  months.forEach(m => {
-    const d1  = g1[m]  || {};
-    const d2  = g2b[m] || {};
-    const d3  = g3b[m] || {};
-    rows.push([
-      m,
-      d1.taxable || 0, d1.cgst || 0, d1.sgst || 0, d1.igst || 0,
-      d3.taxable || 0, d3.cgst || 0, d3.sgst || 0, d3.igst || 0,
-      d2.cgst || 0,    d2.sgst || 0, d2.igst || 0,
-      d3.itc_cgst || 0, d3.itc_sgst || 0, d3.itc_igst || 0,
-    ]);
-  });
-
-  const csv  = rows.map(r => r.join(',')).join('\n');
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href     = url;
-  a.download = 'GST_Reconciliation.csv';
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
 // ── Reset ──────────────────────────────────────────────────────────────────
 
 function resetAll() {
@@ -228,5 +190,5 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('btn-run').addEventListener('click', runRecon);
   document.getElementById('btn-reset').addEventListener('click', resetAll);
-  document.getElementById('btn-download').addEventListener('click', downloadCSV);
+  document.getElementById('btn-download').addEventListener('click', downloadExcel);
 });

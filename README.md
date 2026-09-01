@@ -8,7 +8,7 @@ A client-side web app for reconciling GSTR-1, GSTR-2B, and GSTR-3B returns acros
 2. For each of GSTR-1, GSTR-2B, and GSTR-3B, add up to 12 portal-downloaded monthly JSON files (multi-select is supported). Each card shows the months loaded as removable chips.
 3. Uploading a file for a month that's already loaded replaces the earlier one — a warning banner confirms which file was replaced.
 4. Click **Run Reconciliation** once at least one file is loaded for all three return types (a full 12 months isn't required to run).
-5. Review the tables and download a CSV if needed.
+5. Review the tables and click **Download Excel** for a formatted `.xlsx` report.
 
 ## What it reconciles
 
@@ -35,6 +35,10 @@ Subtracts: `cdnr` (credit notes)
 - Outward liability: `sup_details.osup_det`
 - ITC claimed: `itc_elg.itc_avl`
 
+## Excel export
+
+**Download Excel** produces a 3-sheet workbook — **Workings** (per-month source tables with `SUM()` totals for GSTR-1, GSTR-2B, and GSTR-3B ITC), **Reconciliation** (sales and ITC recon, linked to Workings via formulas, with match rows filled green and mismatches filled amber), and **Notes**. Every derived figure is a live formula, not a hardcoded value.
+
 ## Project structure
 
 ```
@@ -43,7 +47,10 @@ src/
   styles.css        All styling
   parsers.js        GSTR JSON parsers
   tables.js         DOM table renderers
-  app.js            App logic, file handling, CSV export
+  xlsx-export.js    Formatted Excel workbook builder (ExcelJS)
+  app.js            App logic, file handling
+  vendor/
+    exceljs.min.js  Vendored ExcelJS browser bundle
 ```
 
 ## Hosting
