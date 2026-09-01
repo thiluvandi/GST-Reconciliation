@@ -113,7 +113,11 @@ function parseGSTR1(data) {
 
 /**
  * Parse GSTR-2B JSON.
- * Aggregates: b2b, impg, impgsez (adds); cdnr (subtracts).
+ * Aggregates: b2b, b2ba (amended B2B), ecom (adds); cdnr, cdnra (subtracts);
+ * impg, impgsez (adds). Unlike GSTR-1/3B, GSTR-2B line items carry their tax
+ * amounts directly as cgst/sgst/igst (not camt/samt/iamt), and suppliers list
+ * their line items under `inv` (invoices) or `nt` (credit/debit notes), not
+ * `docs`.
  * @param {Object} data - Parsed GSTR-2B JSON
  * @returns {Object} { [monthLabel]: { cgst, sgst, igst } }
  */
@@ -135,19 +139,24 @@ function parseGSTR2B(data) {
 
   const doc = inner.docdata || {};
 
-  // B2B eligible ITC
-  (doc.b2b || []).forEach(supplier =>
-    (supplier.docs || []).forEach(d => add(month, d.camt, d.samt, d.iamt))
+  // B2B, amended B2B, and e-commerce operator supplies — eligible ITC (adds)
+  ['b2b', 'b2ba', 'ecom'].forEach(key =>
+    (doc[key] || []).forEach(supplier =>
+      (supplier.inv || []).forEach(inv => add(month, inv.cgst, inv.sgst, inv.igst))
+    )
   );
 
-  // CDNR — credit notes reduce ITC
-  (doc.cdnr || []).forEach(supplier =>
-    (supplier.docs || []).forEach(d => add(month, d.camt, d.samt, d.iamt, -1))
+  // CDNR and amended CDNR — credit notes (typ 'C') reduce ITC, debit notes
+  // (typ 'D') increase it
+  ['cdnr', 'cdnra'].forEach(key =>
+    (doc[key] || []).forEach(supplier =>
+      (supplier.nt || []).forEach(nt => add(month, nt.cgst, nt.sgst, nt.igst, nt.typ === 'D' ? 1 : -1))
+    )
   );
 
   // Import of goods
-  (doc.impg    || []).forEach(r => add(month, 0, 0, r.iamt));
-  (doc.impgsez || []).forEach(r => add(month, 0, 0, r.iamt));
+  (doc.impg    || []).forEach(r => add(month, 0, 0, r.igst));
+  (doc.impgsez || []).forEach(r => add(month, 0, 0, r.igst));
 
   return totals;
 }

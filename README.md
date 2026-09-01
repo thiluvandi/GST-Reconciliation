@@ -27,8 +27,10 @@ Subtracts: `cdnr`, `cdnur` (credit notes)
 
 ## GSTR-2B aggregation logic
 
-Adds: `b2b`, `impg`, `impgsez`  
-Subtracts: `cdnr` (credit notes)
+Adds: `b2b`, `b2ba` (amended B2B), `ecom` (e-commerce operator supplies), `impg`, `impgsez`  
+Subtracts: `cdnr`/`cdnra` notes with `typ: "C"` (credit notes) — adds instead for `typ: "D"` (debit notes)
+
+Unlike GSTR-1/3B, GSTR-2B line items carry tax amounts directly as `cgst`/`sgst`/`igst` (not `camt`/`samt`/`iamt`), under `inv` (invoices) or `nt` (notes) arrays, not `docs`.
 
 ## GSTR-3B fields used
 
