@@ -108,6 +108,14 @@ function parseGSTR1(data) {
     })
   );
 
+  // The GSTR extension folds a month's filed GSTR-1A into the file it hands
+  // over and leaves this marker so the month can be flagged. Rows are already
+  // in the arrays above, so the totals include them.
+  if (data.gstr1a && month) {
+    ensure(month);
+    totals[month].gstr1a = data.gstr1a;
+  }
+
   return totals;
 }
 

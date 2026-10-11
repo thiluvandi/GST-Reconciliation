@@ -46,6 +46,31 @@ function buildThead(table, headers) {
 }
 
 /**
+ * Small badge shown next to a month when GSTR-1A was involved. `info` is the
+ * marker the extension leaves in the GSTR-1 data: { state, note, fil_dt, arn,
+ * sections, added }. Nothing is drawn for months without one.
+ */
+function appendGstr1ABadge(td, info) {
+  if (!info) return;
+  const span = document.createElement('span');
+  span.className = 'bk-badge';
+  if (info.state === 'included') {
+    span.classList.add('ok');
+    span.textContent = 'GSTR-1A included';
+    const secs = Object.entries(info.sections || {}).map(([k, v]) => `${k}: ${v}`).join(', ');
+    const a = info.added || {};
+    span.title = `GSTR-1A${info.fil_dt ? ' filed ' + info.fil_dt : ''}${info.arn ? ' (ARN ' + info.arn + ')' : ''} was added to GSTR-1 for this month.` +
+      (secs ? ` Rows: ${secs}.` : '') +
+      (a.txval !== undefined ? ` Added taxable value ${fmt(a.txval)}, CGST ${fmt(a.camt)}, SGST ${fmt(a.samt)}, IGST ${fmt(a.iamt)}.` : '');
+  } else {
+    span.classList.add('warn');
+    span.textContent = 'GSTR-1A not verified';
+    span.title = info.note || 'GSTR-1A could not be checked for this month.';
+  }
+  td.appendChild(span);
+}
+
+/**
  * Render sales table (Taxable Value + CGST + SGST + IGST + Total).
  * Used for both GSTR-1 and GSTR-3B sales sections.
  *
@@ -69,6 +94,7 @@ function buildSalesTable(tableId, monthData, months) {
     const tr = tbody.insertRow();
     [m, fmt(d.taxable), fmt(d.cgst), fmt(d.sgst), fmt(d.igst), fmt(total)]
       .forEach(v => { tr.insertCell().textContent = v; });
+    appendGstr1ABadge(tr.cells[0], d.gstr1a);
   });
 
   // Total row
@@ -139,6 +165,7 @@ function buildSalesReconTable(tableId, g1, g3b, months) {
       if (i === 3) td.className = match ? 'diff-zero' : (diff > 0 ? 'diff-pos' : 'diff-neg');
       if (i === 4) td.className = match ? 'status-match' : 'status-mismatch';
     });
+    appendGstr1ABadge(tr.cells[0], d1.gstr1a);
   });
 }
 
