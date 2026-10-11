@@ -89,6 +89,8 @@
         taxable, igst, cgst, sgst, cess,
         total: r.val !== undefined ? num(r.val) : round2(taxable + igst + cgst + sgst + cess),
         itcAvailable: r.itcavl === 'Y' || r.itcavl === 'Yes',
+        reverseCharge: r.rev === 'Y',        // tax is paid by the recipient — not a normal input-tax purchase
+        pos: String(r.pos || ''),
         section: kind === 'INV' ? 'B2B' : 'CDN',
       });
     };

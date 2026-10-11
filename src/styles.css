@@ -322,3 +322,50 @@ td.status-mismatch { color: var(--red); font-family: var(--sans); font-weight: 6
   .site-foot { padding: 18px 16px; }
   .site-foot a { margin: 0 18px 0 0; }
 }
+
+
+/* ── Tally import / send ─────────────────────────────────────────────────── */
+.tally-range { display: flex; gap: 10px; align-items: center; }
+.tally-range label { font-size: 12px; font-weight: 600; color: var(--ink-2); display: flex; align-items: center; gap: 6px; }
+.tally-range input[type=month] {
+  font: inherit; font-size: 13px; padding: 7px 10px; color: var(--ink);
+  background: var(--surface); border: 2px solid var(--ink); border-radius: 999px;
+}
+.ext-status { font-size: 12px; margin-top: 12px; color: var(--ink-3); }
+.ext-status.ok::before { content: "●"; color: var(--green); margin-right: 6px; }
+.ext-status.warn { color: var(--amber); }
+.ext-status.warn::before { content: "●"; margin-right: 6px; }
+
+/* the file-based fallback is deliberately quiet */
+.books-alt { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+.books-alt > summary { cursor: pointer; font-size: 12px; color: var(--ink-3); }
+.books-alt .books-actions { margin-top: 10px; }
+.books-link {
+  background: none; border: none; padding: 0; cursor: pointer;
+  font: inherit; font-size: 12px; color: var(--ink-2); text-decoration: underline; text-underline-offset: 3px;
+}
+.books-link:hover { color: var(--ink); }
+
+.tp-bar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 6px 14px 12px; }
+.tp-all { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.tp-bar .btn-run { margin-left: auto; }
+.tp-pick { width: 34px; }
+.tp-state { font-size: 12px; color: var(--ink-3); }
+.tp-state.sent { color: var(--green); font-weight: 600; }
+.tp-panel { margin: 14px; padding: 16px; background: var(--bg); border: 1px solid var(--border); border-radius: 12px; }
+.tp-panel h4 { font-size: 14px; margin-bottom: 4px; }
+.tp-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; margin: 12px 0; }
+.tp-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 600; color: var(--ink-2); }
+.tp-field input {
+  font: inherit; font-size: 13px; font-weight: 400; padding: 8px 10px; color: var(--ink);
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+}
+.tp-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 14px 0 4px; }
+.notice-ok { background: var(--green-light); border: 1px solid #86efac; color: var(--green); }
+
+/* text columns read left-to-right; only figures are right-aligned */
+.bk-table th, .bk-table td { text-align: left; }
+.bk-table th.num, .bk-table td.num { text-align: right; }
+.bk-table td:first-child { font-family: inherit; }
+#books-results .summary-grid { grid-template-columns: repeat(5, 1fr); }
+@media (max-width: 980px) { #books-results .summary-grid { grid-template-columns: repeat(2, 1fr); } }

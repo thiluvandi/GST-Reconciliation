@@ -37,6 +37,15 @@ Unlike GSTR-1/3B, GSTR-2B line items carry tax amounts directly as `cgst`/`sgst`
 - Outward liability: `sup_details.osup_det`
 - ITC claimed: `itc_elg.itc_avl`
 
+## GSTR-2B vs Tally books
+
+The **GSTR-2B vs Books** section matches every GSTR-2B invoice against the purchase entries in Tally.
+
+- **Import from Tally** reads the purchase register for a From/To month range straight from TallyPrime running on the same PC (HTTP/XML server, port 9000) and reconciles it with the loaded GSTR-2B files. A CSV/JSON register is still available under "No Tally connection?".
+- **Send selected to Tally** books the invoices that are in GSTR-2B but not in your books as Purchase vouchers (credit notes become Debit Notes). You tick the invoices, check a preview (supplier ledgers that will be created, ledger names, totals), then confirm. Reverse-charge and ITC-not-available invoices are not offered. Ledger names are remembered in this browser.
+
+The page can't call Tally directly (Tally sends no CORS headers; this site is https), so both go through the **BoltYards GSTR downloader** browser extension, v1.6.0 or later, which relays page requests to `localhost:9000`. Nothing leaves your computer.
+
 ## Excel export
 
 **Download Excel** produces a 3-sheet workbook — **Workings** (per-month source tables with `SUM()` totals for GSTR-1, GSTR-2B, and GSTR-3B ITC), **Reconciliation** (sales and ITC recon, linked to Workings via formulas, with match rows filled green and mismatches filled amber), and **Notes**. Every derived figure is a live formula, not a hardcoded value.
@@ -51,6 +60,9 @@ src/
   tables.js         DOM table renderers
   xlsx-export.js    Formatted Excel workbook builder (ExcelJS)
   app.js            App logic, file handling
+  booksrecon.js     Invoice-wise 2B vs books matcher
+  books-ui.js       Books section: register loading, results
+  tally-ui.js       Import from / send to Tally (via the extension)
   vendor/
     exceljs.min.js  Vendored ExcelJS browser bundle
 ```

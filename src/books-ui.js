@@ -13,6 +13,9 @@ const BOOKS_TEMPLATE_HEADERS = ['Date', 'Voucher No', 'Supplier Invoice No', 'Pa
 let booksRows = [];
 let booksLabel = '';
 let booksResult = null;
+// Which Tally company the rows came from (empty for a CSV/JSON file). Sending
+// invoices back to Tally is only allowed when this is known.
+let booksMeta = { company: '', companyGstins: [] };
 
 // ── Reading a purchase register ─────────────────────────────────────────────
 
@@ -81,9 +84,10 @@ function booksRowsFromCSV(text) {
   }).filter(r => r.invoiceNo || r.voucherNo);
 }
 
-function setBooks(rows, label) {
+function setBooks(rows, label, meta) {
   booksRows = rows;
   booksLabel = label || 'purchase register';
+  booksMeta = { company: (meta && meta.company) || '', companyGstins: (meta && meta.companyGstins) || [] };
   booksResult = null;
   document.getElementById('books-results').style.display = 'none';
   refreshBooksControls();
@@ -94,9 +98,9 @@ function refreshBooksControls() {
   const run = document.getElementById('btn-books-run');
   const hint = document.getElementById('books-hint');
   run.disabled = !(have2b && booksRows.length);
-  if (!have2b && !booksRows.length) hint.textContent = 'Load GSTR-2B above and a purchase register to begin.';
+  if (!have2b && !booksRows.length) hint.textContent = 'Load GSTR-2B above, then import your purchase register from Tally.';
   else if (!have2b) hint.textContent = `${booksRows.length} purchase entries loaded from ${booksLabel} — now add GSTR-2B files above.`;
-  else if (!booksRows.length) hint.textContent = `${have2b} GSTR-2B month${have2b === 1 ? '' : 's'} loaded — now add a purchase register.`;
+  else if (!booksRows.length) hint.textContent = `${have2b} GSTR-2B month${have2b === 1 ? '' : 's'} loaded — now import the purchase register from Tally.`;
   else hint.textContent = `${booksRows.length} purchase entries (${booksLabel}) vs ${have2b} GSTR-2B month${have2b === 1 ? '' : 's'} — ready.`;
 }
 
@@ -180,7 +184,9 @@ function renderBooksResult(r) {
     ${section('Amount differs', 'bad', 'Same supplier and invoice in both, but the tax amounts disagree. The difference is books − 2B.', pairCols, r.differs)}
     ${section('Probable matches — no GSTIN in books', 'warn', 'These vouchers have no usable GSTIN, so they were matched on invoice number and amount only. Please confirm each, then add the GSTIN to the party in Tally.', probableCols, r.probable)}
     ${section('Possible matches — invoice number differs', 'warn', 'Same supplier, same amount, close dates, but the invoice number is typed differently.', pairCols, r.possible)}
-    ${section('In GSTR-2B, not in books', 'bad', 'The supplier reported these but they are not in your purchase register. ITC can usually only be claimed once they are booked.', only2bCols, r.only2b)}
+    ${typeof only2bSectionHTML === 'function'
+      ? only2bSectionHTML(r)
+      : section('In GSTR-2B, not in books', 'bad', 'The supplier reported these but they are not in your purchase register. ITC can usually only be claimed once they are booked.', only2bCols, r.only2b)}
     ${section('In books, not in GSTR-2B', 'bad', 'In your purchase register with a GSTIN, but the supplier has not reported them (yet).', onlyBooksCols, r.onlyBooks)}
     ${section('In books, no usable GSTIN, no match', 'warn', 'No valid GSTIN to match on and nothing in 2B fits. May be unregistered suppliers, or a missing GSTIN.', onlyBooksCols, r.noGstin)}
     ${section('Matched', 'ok', '', pairCols, r.matched, { open: false })}
@@ -190,6 +196,7 @@ function renderBooksResult(r) {
   out.innerHTML = html;
   out.style.display = 'block';
   document.getElementById('btn-books-csv').addEventListener('click', downloadBooksCSV);
+  if (typeof bindOnly2b === 'function') bindOnly2b(r);
 }
 
 function downloadBooksCSV() {
@@ -256,7 +263,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // read from Tally). Only same-window messages of one known type are accepted.
   window.addEventListener('message', e => {
     if (e.source !== window || !e.data || e.data.type !== 'GSTR_BOOKS_ROWS' || !Array.isArray(e.data.rows)) return;
-    setBooks(e.data.rows, e.data.label || 'Tally');
+    setBooks(e.data.rows, e.data.label || 'Tally', { company: e.data.company, companyGstins: e.data.companyGstins });
   });
 
   refreshBooksControls();
