@@ -17,7 +17,7 @@
  */
 
 const TALLY_CFG_KEY = 'gstr_tally_cfg_v1';
-const MIN_EXT_VERSION = '1.10.0';
+const MIN_EXT_VERSION = '1.11.0';
 const PUSH_CHUNK = 20;                 // vouchers per request, so progress can be shown
 
 const ext = { ready: false, version: '' };
@@ -207,6 +207,7 @@ function only2bSectionHTML(r) {
   pushSel = new Set();
   pushSent = new Set();
   pushSplit = {};
+  lineOverrides = {};
   pushRows.forEach(k => { k._rate = BooksRecon.impliedRate(k.taxable, k.igst + k.cgst + k.sgst); });
   if (!pushRows.length) return '';
   const canSend = !!booksMeta.company;
@@ -449,6 +450,7 @@ async function openPushPanel() {
     const vouchers = selectedVouchers();
     // First pass only to learn which ledgers exist, so settings can be suggested.
     const first = await tallyRequest('plan', { vouchers: vouchers.map(wireVoucher), config: readStoredCfgForPlan() }, 60000);
+    planItems = first.items || [];
     renderPushPanel(first.ledgers || []);
     await refreshPreview();
   } catch (err) {
@@ -461,6 +463,84 @@ function readStoredCfgForPlan() {
 }
 
 let knownLedgers = [];
+let planItems = [];             // supplier ledger per selected invoice, as Tally resolved it
+let lineOverrides = {};         // "row:line" -> { field: ledger } typed against one invoice line
+let lineIndex = new Map();      // "row:line" -> { v, l }
+let previewTimer = null;
+
+const LINE_FIELDS = [['purchase', 'Purchase ledger'], ['cgst', 'Input CGST'], ['sgst', 'Input SGST'], ['igst', 'Input IGST']];
+const needsField = (l, f) => (f === 'purchase' ? l.taxable > 0 : l[f] > 0);
+const currentMode = () => (((document.querySelector('input[name="tcfg-mode"]:checked') || {}).value) === 'single' ? 'single' : 'byRate');
+
+/** The ledgers an invoice line gets from the defaults (step 1). */
+function defaultLedgers(v, l) {
+  const val = id => ((document.getElementById(id) || {}).value || '').trim();
+  const cess = val('tcfg-cess');
+  if (currentMode() === 'single') {
+    const purchase = v.kind === 'CN' ? (val('tcfg-returnLedger') || val('tcfg-purchaseLedger')) : val('tcfg-purchaseLedger');
+    return { purchase, cgst: val('tcfg-cgst'), sgst: val('tcfg-sgst'), igst: val('tcfg-igst'), cess };
+  }
+  const key = fmtRate(l.rate);
+  const get = f => ((document.querySelector(`.trm[data-rate="${key}"][data-field="${f}"]`) || {}).value || '').trim();
+  return { purchase: get('purchase'), cgst: get('cgst'), sgst: get('sgst'), igst: get('igst'), cess };
+}
+const effectiveLedgers = (v, l, key) => ({ ...defaultLedgers(v, l), ...(lineOverrides[key] || {}) });
+
+/** Selected invoices with the ledgers each line will post to. */
+function vouchersWithLedgers() {
+  return selectedVouchers().map(v => ({
+    ...v, lines: (v.lines || []).map((l, n) => ({ ...l, ledgers: effectiveLedgers(v, l, `${v._row}:${n}`) })),
+  }));
+}
+
+function invoiceTableHTML() {
+  lineIndex = new Map();
+  const rows = selectedVouchers().map((v, vi) => {
+    const lines = v.lines || [];
+    const party = planItems[vi] || { partyLedger: v.party, isNew: false };
+    return lines.map((l, n) => {
+      const key = `${v._row}:${n}`;
+      lineIndex.set(key, { v, l });
+      const ovr = lineOverrides[key] || {};
+      const eff = effectiveLedgers(v, l, key);
+      const head = n === 0 ? `
+        <td rowspan="${lines.length}">${esc(party.partyLedger)}${party.isNew ? '<span class="bk-badge warn">new ledger</span>' : ''}</td>
+        <td rowspan="${lines.length}">${esc(v.invoiceNo)}${v.kind === 'CN' ? '<div class="tp-sub">Credit note → Debit Note</div>' : ''}</td>` : '';
+      const cells = LINE_FIELDS.map(([f, label]) => needsField(l, f)
+        ? `<td><input type="text" class="tl${f in ovr ? ' ovr' : ''}" list="tally-ledgers" data-key="${key}" data-field="${f}" value="${esc(eff[f])}" autocomplete="off" aria-label="${esc(v.invoiceNo)} ${esc(label)}"></td>`
+        : '<td class="tp-na">–</td>').join('');
+      const reset = Object.keys(ovr).length ? `<button type="button" class="tp-link" data-reset="${key}">Reset</button>` : '';
+      return `<tr>${head}<td>${esc(fmtRate(l.rate))}%</td><td class="num">${money(l.taxable)}</td>
+        <td class="num">${money(l.igst + l.cgst + l.sgst + l.cess)}</td>${cells}<td class="tp-reset">${reset}</td></tr>`;
+    }).join('');
+  }).join('');
+  return `<div style="overflow-x:auto"><table class="bk-table tp-lines"><thead><tr>
+    <th>Supplier ledger</th><th>Invoice</th><th>Rate</th><th class="num">Taxable</th><th class="num">Tax</th>
+    ${LINE_FIELDS.map(([, l]) => `<th>${esc(l)}</th>`).join('')}<th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+/** Put the current defaults into every invoice cell the user has not changed. */
+function syncLineInputs() {
+  document.querySelectorAll('.tl').forEach(inp => {
+    const key = inp.dataset.key, f = inp.dataset.field;
+    if ((lineOverrides[key] || {})[f] !== undefined) return;
+    const { v, l } = lineIndex.get(key);
+    inp.value = defaultLedgers(v, l)[f];
+  });
+}
+
+function redrawInvoiceTable() {
+  document.getElementById('tp-lines').innerHTML = invoiceTableHTML();
+}
+
+function schedulePreview() {
+  const confirm = document.getElementById('btn-tally-confirm');
+  if (confirm) confirm.disabled = true;
+  const hint = document.getElementById('tp-preview-state');
+  if (hint) hint.textContent = 'Updating…';
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(refreshPreview, 500);
+}
 
 function renderPushPanel(ledgers) {
   knownLedgers = ledgers;
@@ -474,8 +554,8 @@ function renderPushPanel(ledgers) {
   };
   const mode = stored.mode || (looksRateWise(ledgers) ? 'byRate' : 'single');
   const options = ledgers.map(l => `<option value="${esc(l.name)}">${esc(l.parent)}</option>`).join('');
-  const input = (id, v, extra) => `<input type="text" id="${id}" list="tally-ledgers" value="${esc(v)}" autocomplete="off" ${extra || ''}>`;
-  const field = ([k, label, def]) => `<label class="tp-field"><span>${esc(label)}</span>${input('tcfg-' + k, val(k, def))}</label>`;
+  const input = (attrs, v) => `<input type="text" list="tally-ledgers" value="${esc(v)}" autocomplete="off" ${attrs}>`;
+  const field = ([k, label, def]) => `<label class="tp-field"><span>${esc(label)}</span>${input(`id="tcfg-${k}" class="tdef"`, val(k, def))}</label>`;
 
   let rateSuggested = false;
   const rateRows = selectedRates().map(r => {
@@ -483,63 +563,91 @@ function renderPushPanel(ledgers) {
     const saved = (stored.rateMap || {})[key] || {};
     const guess = suggestForRate(r.rate, ledgers);
     const cells = RATE_FIELDS.map(([f]) => {
-      const needed = f === 'purchase' || (f === 'igst' ? r.inter : r.intra) && r.rate > 0;
+      const needed = f === 'purchase' || ((f === 'igst' ? r.inter : r.intra) && r.rate > 0);
       if (!needed) return '<td class="tp-na">–</td>';
       let v = saved[f] || '';
       if (!v && guess[f]) { v = guess[f]; rateSuggested = true; }
-      return `<td>${input('', v, `class="trm" data-rate="${esc(key)}" data-field="${f}" aria-label="${esc(key)}% ${f}"`).replace(' id=""', '')}</td>`;
+      return `<td>${input(`class="trm tdef" data-rate="${esc(key)}" data-field="${f}" aria-label="${esc(key)}% ${f}"`, v)}</td>`;
     }).join('');
     return `<tr><td class="tp-ratecol">${esc(key)}%</td>${cells}</tr>`;
   }).join('');
 
-  document.getElementById('tally-push-panel').innerHTML = `
+  const panel = document.getElementById('tally-push-panel');
+  panel.innerHTML = `
     <div class="tp-panel">
       <h4>Send to Tally</h4>
-      <p class="bk-note">Posting into <b>${esc(booksMeta.company)}</b>. Vouchers are created in Tally exactly as previewed below — nothing is written until you confirm.</p>
+      <p class="bk-note">Posting into <b>${esc(booksMeta.company)}</b>. Nothing is written to Tally until you click Create.</p>
       <datalist id="tally-ledgers">${options}</datalist>
-      <div class="tp-mode" role="radiogroup" aria-label="How ledgers are chosen">
+
+      <div class="tp-step">1. Default ledgers</div>
+      <div class="tp-mode" role="radiogroup" aria-label="How default ledgers are chosen">
         <label><input type="radio" name="tcfg-mode" value="byRate" ${mode === 'byRate' ? 'checked' : ''}> Ledgers by rate</label>
         <label><input type="radio" name="tcfg-mode" value="single" ${mode === 'single' ? 'checked' : ''}> One set of ledgers for every invoice</label>
       </div>
       <div class="tp-fields">${COMMON_FIELDS.map(field).join('')}</div>
       <div id="tp-by-rate" ${mode === 'byRate' ? '' : 'hidden'}>
         <div style="overflow-x:auto"><table class="bk-table tp-rates"><thead><tr><th>Rate</th>${RATE_FIELDS.map(([, l]) => `<th>${esc(l)}</th>`).join('')}</tr></thead><tbody>${rateRows}</tbody></table></div>
-        <p class="bk-note">Choose the ledgers Tally should use for each rate in this selection. Purchases at a rate go to that rate's purchase ledger; CGST and SGST (or IGST for inter-state) go to that rate's input ledgers. Credit notes use the same purchase ledgers.</p>
       </div>
       <div id="tp-single" ${mode === 'single' ? '' : 'hidden'}><div class="tp-fields">${SINGLE_FIELDS.map(field).join('')}</div></div>
-      ${(suggested.length || rateSuggested) ? '<p class="bk-note">Some ledgers were suggested from your Tally ledger names — please check them. Your choices are remembered for this company in this browser.</p>' : ''}
-      <div class="tp-actions"><button type="button" class="btn-reset" id="btn-tally-preview">Refresh preview</button></div>
+      ${(suggested.length || rateSuggested) ? '<p class="bk-note">Some defaults were suggested from your Tally ledger names — check them. Defaults are remembered for this company in this browser.</p>' : '<p class="bk-note">Defaults are remembered for this company in this browser.</p>'}
+
+      <div class="tp-step">2. Ledgers for each invoice</div>
+      <p class="bk-note">Filled in from the defaults above. Change any cell to post that invoice differently; changed cells are highlighted and can be reset.</p>
+      <div id="tp-lines"></div>
+
+      <div class="tp-step">3. Check and create <span class="run-hint" id="tp-preview-state"></span></div>
       <div id="tally-preview"></div>
     </div>`;
-  document.getElementById('btn-tally-preview').addEventListener('click', refreshPreview);
+
+  // Filled only now: each invoice's ledgers are read from the defaults above, which must exist first.
+  redrawInvoiceTable();
+
+  panel.addEventListener('input', e => {
+    const t = e.target;
+    if (t.classList.contains('tl')) {
+      const key = t.dataset.key, f = t.dataset.field;
+      const { v, l } = lineIndex.get(key);
+      const def = defaultLedgers(v, l)[f];
+      lineOverrides[key] = lineOverrides[key] || {};
+      if (t.value.trim() === def) delete lineOverrides[key][f]; else lineOverrides[key][f] = t.value.trim();
+      if (!Object.keys(lineOverrides[key]).length) delete lineOverrides[key];
+      t.classList.toggle('ovr', f in (lineOverrides[key] || {}));
+      const cell = t.closest('tr').querySelector('.tp-reset');
+      cell.innerHTML = lineOverrides[key] ? `<button type="button" class="tp-link" data-reset="${key}">Reset</button>` : '';
+      schedulePreview();
+    } else if (t.classList.contains('tdef')) {
+      syncLineInputs();
+      schedulePreview();
+    }
+  });
+  panel.addEventListener('click', e => {
+    const b = e.target.closest('[data-reset]');
+    if (!b) return;
+    delete lineOverrides[b.dataset.reset];
+    redrawInvoiceTable();
+    schedulePreview();
+  });
   document.querySelectorAll('input[name="tcfg-mode"]').forEach(r => r.addEventListener('change', () => {
-    const by = document.querySelector('input[name="tcfg-mode"]:checked').value === 'byRate';
+    const by = currentMode() === 'byRate';
     document.getElementById('tp-by-rate').hidden = !by;
     document.getElementById('tp-single').hidden = by;
-    refreshPreview();
+    syncLineInputs();
+    schedulePreview();
   }));
 }
 
 async function refreshPreview() {
+  clearTimeout(previewTimer);
   const box = document.getElementById('tally-preview');
+  const state = document.getElementById('tp-preview-state');
   const cfg = readCfgForm();
   saveCfg(cfg._flat);
-  box.innerHTML = '<p class="bk-note">Checking against Tally…</p>';
-  const vouchers = selectedVouchers();
-  const rateLabel = v => (v.lines || []).map(l => fmtRate(l.rate) + '%').join(' + ');
+  if (state) state.textContent = 'Checking against Tally…';
+  const vouchers = vouchersWithLedgers();
   try {
     const plan = await tallyRequest('plan', { vouchers: vouchers.map(wireVoucher), config: cfg }, 60000);
+    if (state) state.textContent = '';
     const newCount = new Set(plan.items.filter(p => p.isNew).map(p => p.partyLedger)).size;
-    const rows = vouchers.map((v, i) => {
-      const p = plan.items[i];
-      return `<tr><td>${esc(p.partyLedger)}${p.isNew ? '<span class="bk-badge warn">new ledger</span>' : ''}</td>
-        <td>${esc(v.gstin)}</td><td>${esc(v.invoiceNo)}</td><td>${esc(dmy(BooksRecon.parseDate(v.date)))}</td>
-        <td>${esc(rateLabel(v))}</td>
-        <td class="num">${money(v.taxable)}</td><td class="num">${money(v.igst + v.cgst + v.sgst + v.cess)}</td>
-        <td class="num">${money(v.taxable + v.igst + v.cgst + v.sgst + v.cess)}</td>
-        <td>${v.kind === 'CN' ? esc(cfg.debitNoteType) : esc(cfg.voucherType)}</td></tr>`;
-    }).join('');
-    // totals by rate, so they can be compared with the ITC in GSTR-2B
     const byRate = new Map();
     vouchers.forEach(v => (v.lines || []).forEach(l => {
       const key = fmtRate(l.rate), sign = v.kind === 'CN' ? -1 : 1;
@@ -550,8 +658,8 @@ async function refreshPreview() {
     const rateTable = [...byRate.values()].sort((a, b) => a.rate - b.rate).map(e =>
       `<tr><td>${esc(fmtRate(e.rate))}%</td><td class="num">${e.n.size}</td><td class="num">${money(e.taxable)}</td><td class="num">${money(e.tax)}</td></tr>`).join('');
     const problems = [];
-    if ((plan.unmapped || []).length) problems.push(`Choose ledgers for: ${plan.unmapped.join('; ')}`);
-    if (plan.missing.length) problems.push(`These ledgers are not in Tally — pick existing ones above: ${plan.missing.map(m => m || '(blank)').join(', ')}`);
+    if ((plan.unmapped || []).length) problems.push(`Choose a ledger for: ${plan.unmapped.join('; ')}`);
+    if (plan.missing.length) problems.push(`These ledgers are not in Tally — pick existing ones: ${plan.missing.map(m => m || '(blank)').join(', ')}`);
     box.innerHTML = `
       <div class="summary-grid" style="grid-template-columns:repeat(3,1fr)">
         <div class="summary-card"><div class="sc-label">Vouchers to create</div><div class="sc-value">${vouchers.length}</div><div class="sc-sub">${esc(booksMeta.company)}</div></div>
@@ -560,9 +668,6 @@ async function refreshPreview() {
       </div>
       ${problems.map(t => `<div class="notice notice-error" style="margin-bottom:10px"><span>${esc(t)}</span></div>`).join('')}
       ${rateTable ? `<div style="overflow-x:auto"><table class="bk-table tp-ratesum"><thead><tr><th>Rate</th><th class="num">Vouchers</th><th class="num">Taxable</th><th class="num">Tax</th></tr></thead><tbody>${rateTable}</tbody></table></div>` : ''}
-      <div style="overflow-x:auto"><table class="bk-table"><thead><tr>
-        <th>Supplier ledger</th><th>GSTIN</th><th>Invoice (reference)</th><th>Date</th><th>Rate</th><th class="num">Taxable</th><th class="num">Tax</th><th class="num">Total</th><th>Voucher</th>
-      </tr></thead><tbody>${rows}</tbody></table></div>
       <div class="tp-actions">
         <button type="button" class="btn-run" id="btn-tally-confirm" ${problems.length || !vouchers.length ? 'disabled' : ''}>Create ${vouchers.length} voucher${vouchers.length === 1 ? '' : 's'} in Tally</button>
         <span class="run-hint">Check the first voucher in Tally before booking the rest.</span>
@@ -571,6 +676,7 @@ async function refreshPreview() {
     const confirm = document.getElementById('btn-tally-confirm');
     if (confirm) confirm.addEventListener('click', () => confirmPush(vouchers, cfg));
   } catch (err) {
+    if (state) state.textContent = '';
     box.innerHTML = `<div class="notice notice-error"><span>${esc(err.message)}</span></div>`;
   }
 }
@@ -579,7 +685,7 @@ async function confirmPush(vouchers, cfg) {
   const btn = document.getElementById('btn-tally-confirm');
   const out = document.getElementById('tally-result');
   btn.disabled = true;
-  document.getElementById('btn-tally-preview').disabled = true;
+  document.querySelectorAll('#tally-push-panel input').forEach(i => { i.disabled = true; });
   const results = [];
   try {
     for (let at = 0; at < vouchers.length; at += PUSH_CHUNK) {

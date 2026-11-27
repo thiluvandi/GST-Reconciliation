@@ -394,3 +394,10 @@ td.status-mismatch { color: var(--red); font-family: var(--sans); font-weight: 6
 .tp-rates td.tp-ratecol { font-weight: 600; }
 .tp-ratesum { margin: 0 0 12px; max-width: 520px; }
 [hidden] { display: none !important; }
+
+.tp-step { margin: 18px 0 6px; font-size: 13px; font-weight: 700; color: var(--ink); display: flex; gap: 10px; align-items: baseline; }
+.tp-lines input { width: 100%; min-width: 140px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px; font: inherit; font-size: 12px; background: var(--surface, #fff); }
+.tp-lines input.ovr { background: var(--amber-light); border-color: #fcd34d; }
+.tp-lines td { vertical-align: middle; }
+.tp-sub { font-size: 11px; color: var(--ink-3); }
+.tp-reset { white-space: nowrap; }
