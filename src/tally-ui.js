@@ -506,6 +506,8 @@ function vouchersWithLedgers() {
   }));
 }
 
+const partyResetHTML = row => (row in partyOverrides ? `<button type="button" class="tp-link" data-party-reset="${row}">Reset</button>` : '');
+
 function invoiceTableHTML() {
   lineIndex = new Map();
   const rows = selectedVouchers().map((v, vi) => {
@@ -519,8 +521,9 @@ function invoiceTableHTML() {
       const partyCell = canCreateLedgers()
         ? `<input type="text" class="tparty${v._row in partyOverrides ? ' ovr' : ''}" list="tally-ledgers" data-row="${v._row}" value="${esc(partyOverrides[v._row] || party.partyLedger)}" autocomplete="off" aria-label="${esc(v.invoiceNo)} supplier ledger" title="Post against any ledger in Tally, or type a new name to create one">`
         : esc(party.partyLedger);
+      // Badge and Reset sit under the box: table cells don't wrap, so beside it they ran into the Invoice column.
       const head = n === 0 ? `
-        <td rowspan="${lines.length}">${partyCell}<span class="tp-party-badge">${party.isNew ? '<span class="bk-badge warn">new ledger</span>' : ''}</span>${v._row in partyOverrides ? ` <button type="button" class="tp-link" data-party-reset="${v._row}">Reset</button>` : ''}</td>
+        <td rowspan="${lines.length}"><div class="tp-party">${partyCell}<div class="tp-party-meta"><span class="tp-party-badge">${party.isNew ? '<span class="bk-badge warn">new ledger</span>' : ''}</span><span class="tp-party-reset">${partyResetHTML(v._row)}</span></div></div></td>
         <td rowspan="${lines.length}">${esc(v.invoiceNo)}${v.kind === 'CN' ? '<div class="tp-sub">Credit note → Debit Note</div>' : ''}</td>` : '';
       const cells = LINE_FIELDS.map(([f, label]) => needsField(l, f)
         ? `<td><input type="text" class="tl${f in ovr ? ' ovr' : ''}" list="tally-ledgers" data-key="${key}" data-field="${f}" value="${esc(eff[f])}" autocomplete="off" aria-label="${esc(v.invoiceNo)} ${esc(label)}"></td>`
@@ -595,22 +598,25 @@ function renderPushPanel(ledgers) {
       <p class="bk-note">Posting into <b>${esc(booksMeta.company)}</b>. Nothing is written to Tally until you click Create.</p>
       <datalist id="tally-ledgers">${options}</datalist>
 
-      <div class="tp-step">1. Default ledgers</div>
-      <div class="tp-mode" role="radiogroup" aria-label="How default ledgers are chosen">
-        <label><input type="radio" name="tcfg-mode" value="byRate" ${mode === 'byRate' ? 'checked' : ''}> Ledgers by rate</label>
-        <label><input type="radio" name="tcfg-mode" value="single" ${mode === 'single' ? 'checked' : ''}> One set of ledgers for every invoice</label>
+      <div class="tp-step">1. Your usual purchase and tax ledgers</div>
+      <p class="tp-intro">Set these once. Every invoice in step 2 is filled in with them, so you don't type the same ledgers on each row — you only change the invoices that are different. They are remembered for <b>${esc(booksMeta.company)}</b> in this browser.${(suggested.length || rateSuggested) ? ' Some were guessed from your Tally ledger names; check them.' : ''}</p>
+      <div class="tp-mode" role="radiogroup" aria-label="How the usual ledgers are chosen">
+        <label><input type="radio" name="tcfg-mode" value="byRate" ${mode === 'byRate' ? 'checked' : ''}> Separate ledgers for each GST rate <span class="tp-sub">(e.g. Purchase @ 18 %, INPUT CGST @ 9%)</span></label>
+        <label><input type="radio" name="tcfg-mode" value="single" ${mode === 'single' ? 'checked' : ''}> The same ledgers for every rate</label>
       </div>
-      <div class="tp-fields">${COMMON_FIELDS.map(field).join('')}${canCreateLedgers() ? `
-        <label class="tp-field"><span>New purchase ledgers go under</span><select id="tcfg-newLedgerGroup" class="tdef">${
-          NEW_LEDGER_GROUPS.map(g => `<option ${g === (stored.newLedgerGroup || 'Purchase Accounts') ? 'selected' : ''}>${esc(g)}</option>`).join('')}</select></label>` : ''}</div>
       <div id="tp-by-rate" ${mode === 'byRate' ? '' : 'hidden'}>
         <div style="overflow-x:auto"><table class="bk-table tp-rates"><thead><tr><th>Rate</th>${RATE_FIELDS.map(([, l]) => `<th>${esc(l)}</th>`).join('')}</tr></thead><tbody>${rateRows}</tbody></table></div>
       </div>
       <div id="tp-single" ${mode === 'single' ? '' : 'hidden'}><div class="tp-fields">${SINGLE_FIELDS.map(field).join('')}</div></div>
-      ${(suggested.length || rateSuggested) ? '<p class="bk-note">Some defaults were suggested from your Tally ledger names — check them. Defaults are remembered for this company in this browser.</p>' : '<p class="bk-note">Defaults are remembered for this company in this browser.</p>'}
+      <details class="tp-more">
+        <summary>Other settings — voucher types, cess${canCreateLedgers() ? ', where new ledgers go' : ''}</summary>
+        <div class="tp-fields">${COMMON_FIELDS.map(field).join('')}${canCreateLedgers() ? `
+          <label class="tp-field"><span>New purchase ledgers go under</span><select id="tcfg-newLedgerGroup" class="tdef">${
+            NEW_LEDGER_GROUPS.map(g => `<option ${g === (stored.newLedgerGroup || 'Purchase Accounts') ? 'selected' : ''}>${esc(g)}</option>`).join('')}</select></label>` : ''}</div>
+      </details>
 
-      <div class="tp-step">2. Ledgers for each invoice</div>
-      <p class="bk-note">Filled in from the defaults above. Change any cell to post that invoice differently; changed cells are highlighted and can be reset.${canCreateLedgers() ? ' The supplier ledger can be any ledger already in Tally (pick from the list), or a new name to create. A purchase or tax ledger name that is not in Tally is created for you.' : ''}</p>
+      <div class="tp-step">2. Check each invoice</div>
+      <p class="tp-intro">Each row is filled in from step 1. Change a box only for an invoice that goes somewhere else; changed boxes turn yellow and can be reset.${canCreateLedgers() ? ' <b>Supplier ledger</b>: pick any ledger already in Tally (for example Act Fiber Net for Atria), or type a new name to create one. Any ledger name that is not in Tally is created when you click Create.' : ''}</p>
       <div id="tp-lines"></div>
 
       <div class="tp-step">3. Check and create <span class="run-hint" id="tp-preview-state"></span></div>
@@ -629,6 +635,8 @@ function renderPushPanel(ledgers) {
       if (!t.value.trim() || t.value.trim() === resolved) delete partyOverrides[row];
       else partyOverrides[row] = t.value.trim();
       t.classList.toggle('ovr', row in partyOverrides);
+      const reset = t.closest('.tp-party').querySelector('.tp-party-reset');
+      if (reset) reset.innerHTML = partyResetHTML(row);
       schedulePreview();
     } else if (t.classList.contains('tl')) {
       const key = t.dataset.key, f = t.dataset.field;

@@ -401,3 +401,12 @@ td.status-mismatch { color: var(--red); font-family: var(--sans); font-weight: 6
 .tp-lines td { vertical-align: middle; }
 .tp-sub { font-size: 11px; color: var(--ink-3); }
 .tp-reset { white-space: nowrap; }
+.tp-party { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 220px; }
+.tp-party input { min-width: 220px; }
+.tp-party-meta { display: flex; align-items: center; gap: 8px; }
+.tp-party-meta .bk-badge { margin-left: 0; }
+.tp-party-meta:not(:has(.bk-badge, button)) { display: none; }
+.tp-more { margin: 10px 0 4px; font-size: 12.5px; }
+.tp-more summary { cursor: pointer; color: var(--ink-2); font-weight: 600; }
+.tp-mode .tp-sub { font-weight: 400; }
+.tp-intro { margin: 2px 0 10px; font-size: 12.5px; color: var(--ink-2); max-width: 760px; line-height: 1.5; }
