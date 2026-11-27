@@ -17,7 +17,7 @@
  */
 
 const TALLY_CFG_KEY = 'gstr_tally_cfg_v1';
-const MIN_EXT_VERSION = '1.6.0';
+const MIN_EXT_VERSION = '1.10.0';
 const PUSH_CHUNK = 20;                 // vouchers per request, so progress can be shown
 
 const ext = { ready: false, version: '' };
@@ -174,28 +174,49 @@ async function importFromTally() {
 let pushRows = [];              // r.only2b of the current result
 let pushSel = new Set();        // indexes into pushRows that are ticked
 let pushSent = new Set();       // indexes already booked in Tally this session
+let pushSplit = {};             // index -> per-rate lines chosen for a mixed-rate invoice
+
+const fmtRate = r => String(Math.round(Number(r) * 1000) / 1000);
 
 /** Why an invoice can't be auto-booked ('' = it can). */
-function pushBlocker(k) {
+function pushBlocker(k, i) {
   if (k.reverseCharge) return 'Reverse charge — book manually';
   if (!k.itcAvailable) return 'ITC not available';
   if (!BooksRecon.isoDate(k.date)) return 'No invoice date';
   if (!String(k.no || '').trim()) return 'No invoice number';
+  if (k._rate === null && !pushSplit[i]) return 'Mixed rate — split it, or book manually';
   return '';
+}
+
+function rateText(i) {
+  const k = pushRows[i];
+  if (pushSplit[i]) return pushSplit[i].map(l => fmtRate(l.rate) + '%').join(' + ');
+  return k._rate === null ? 'Mixed' : fmtRate(k._rate) + '%';
+}
+
+function rateCellHTML(i) {
+  const k = pushRows[i];
+  const canSplit = k._rate === null && !k.reverseCharge && k.itcAvailable;
+  const split = pushSplit[i];
+  return esc(rateText(i)) + (canSplit || split
+    ? ` <button type="button" class="tp-link tp-split-btn" data-i="${i}">${split ? 'Edit' : 'Split'}</button>` : '');
 }
 
 function only2bSectionHTML(r) {
   pushRows = r.only2b;
   pushSel = new Set();
   pushSent = new Set();
+  pushSplit = {};
+  pushRows.forEach(k => { k._rate = BooksRecon.impliedRate(k.taxable, k.igst + k.cgst + k.sgst); });
   if (!pushRows.length) return '';
   const canSend = !!booksMeta.company;
   const body = pushRows.map((k, i) => {
-    const why = pushBlocker(k);
+    const why = pushBlocker(k, i);
     return `<tr data-i="${i}">
       <td class="tp-pick"><input type="checkbox" class="tp-row" data-i="${i}" ${why ? 'disabled' : ''} aria-label="Select ${esc(k.no)}"></td>
       <td>${esc(k.party)}</td><td>${esc(k.ctin)}</td><td>${esc(k.no)}</td><td>${esc(dmy(k.date))}</td>
       <td class="num">${money(k.taxable)}</td><td class="num">${money(taxOf(k))}</td>
+      <td class="tp-rate">${rateCellHTML(i)}</td>
       <td class="tp-state">${esc(why || (k.kind === 'CN' ? 'Credit note → Debit Note' : ''))}</td>
     </tr>`;
   }).join('');
@@ -209,14 +230,14 @@ function only2bSectionHTML(r) {
         title="${canSend ? '' : 'Import the register from Tally first, so we know which company to post into.'}">Send selected to Tally…</button>
     </div>
     <div style="overflow-x:auto"><table class="bk-table"><thead><tr>
-      <th></th><th>Supplier</th><th>GSTIN</th><th>Invoice</th><th>Date</th><th class="num">Taxable</th><th class="num">Tax</th><th>Note</th>
+      <th></th><th>Supplier</th><th>GSTIN</th><th>Invoice</th><th>Date</th><th class="num">Taxable</th><th class="num">Tax</th><th>Rate</th><th>Note</th>
     </tr></thead><tbody>${body}</tbody></table></div>
     <div id="tally-push-panel"></div>
   </details>`;
 }
 
 function refreshPickState() {
-  const eligible = pushRows.map((k, i) => i).filter(i => !pushBlocker(pushRows[i]) && !pushSent.has(i));
+  const eligible = pushRows.map((k, i) => i).filter(i => !pushBlocker(pushRows[i], i) && !pushSent.has(i));
   const all = document.getElementById('tp-all');
   const count = document.getElementById('tp-count');
   const btn = document.getElementById('btn-tally-push');
@@ -227,11 +248,76 @@ function refreshPickState() {
   btn.disabled = !(pushSel.size && booksMeta.company);
   document.querySelectorAll('.tp-row').forEach(cb => {
     const i = +cb.dataset.i;
-    cb.checked = pushSel.has(i);
+    const k = pushRows[i];
+    const why = pushBlocker(k, i);
+    const tr = cb.closest('tr');
+    tr.querySelector('.tp-rate').innerHTML = rateCellHTML(i);
+    const st = tr.querySelector('.tp-state');
     if (pushSent.has(i)) {
       cb.disabled = true; cb.checked = false;
-      const st = cb.closest('tr').querySelector('.tp-state');
       st.textContent = 'Sent to Tally ✓'; st.className = 'tp-state sent';
+      return;
+    }
+    cb.disabled = !!why;
+    if (why) pushSel.delete(i);
+    cb.checked = pushSel.has(i);
+    st.textContent = why || (k.kind === 'CN' ? 'Credit note → Debit Note' : (pushSplit[i] ? 'Split across rates' : ''));
+  });
+}
+
+// ── Splitting a mixed-rate invoice ──────────────────────────────────────────
+// 2B has totals only, so an invoice whose tax fits no single rate is either
+// left for manual booking (do nothing) or split here into per-rate lines that
+// add up exactly to the invoice.
+
+function openSplit(i) {
+  const old = document.getElementById('tp-split-' + i);
+  if (old) { old.remove(); return; }
+  const k = pushRows[i];
+  const tax = k.igst + k.cgst + k.sgst;
+  const sug = BooksRecon.suggestSplits(k.taxable, tax).slice(0, 4);
+  // Start from an existing split, or from the best match only when it is a clean one; otherwise a blank line.
+  let parts = pushSplit[i] ? pushSplit[i].map(l => ({ rate: l.rate, taxable: l.taxable }))
+    : (sug[0] && sug[0].round ? sug[0].parts.map(p => ({ ...p })) : [{ rate: 18, taxable: k.taxable }]);
+  const tr = document.createElement('tr');
+  tr.id = 'tp-split-' + i; tr.className = 'tp-split-row';
+  tr.innerHTML = `<td colspan="9"><div class="tp-split">
+    <div class="tp-split-head">Split invoice <b>${esc(k.no)}</b> — taxable ${money(k.taxable)}, tax ${money(tax)}</div>
+    <div class="tp-split-sug">${sug.length
+      ? 'Rates that fit this invoice (check them against the invoice): ' + sug.map((s, j) => `<button type="button" class="tp-chip" data-s="${j}">${s.parts.map(p => `${fmtRate(p.rate)}% on ${money(p.taxable)}`).join(' + ')}</button>`).join('')
+      : 'No two-rate combination matches the tax exactly. Enter the lines by hand, or leave the invoice unticked and book it manually in Tally.'}</div>
+    <div class="tp-split-lines"></div>
+    <div class="tp-split-actions">
+      <button type="button" class="btn-reset" data-act="add">Add a rate</button>
+      <button type="button" class="btn-run" data-act="apply">Use this split</button>
+      <button type="button" class="btn-reset" data-act="clear">${pushSplit[i] ? 'Remove split' : 'Cancel'}</button>
+      <span class="tp-split-msg" role="status"></span>
+    </div></div></td>`;
+  document.querySelector(`tr[data-i="${i}"]`).after(tr);
+  const box = tr.querySelector('.tp-split-lines');
+  const msg = tr.querySelector('.tp-split-msg');
+  const draw = () => {
+    box.innerHTML = parts.map((p, n) => `<div class="tp-split-line" data-n="${n}">
+      <select class="sp-rate" aria-label="Rate">${BooksRecon.RATE_SLABS.map(r => `<option value="${r}" ${+r === +p.rate ? 'selected' : ''}>${fmtRate(r)}%</option>`).join('')}</select>
+      <input class="sp-tx" type="number" step="0.01" min="0" value="${esc(p.taxable)}" aria-label="Taxable value">
+      <button type="button" class="tp-link" data-act="del" ${parts.length < 2 ? 'disabled' : ''}>Remove</button></div>`).join('');
+  };
+  const read = () => [...box.querySelectorAll('.tp-split-line')].map(l => ({ rate: +l.querySelector('.sp-rate').value, taxable: +l.querySelector('.sp-tx').value || 0 }));
+  draw();
+  tr.addEventListener('click', e => {
+    const chip = e.target.closest('.tp-chip');
+    if (chip) { parts = sug[+chip.dataset.s].parts.map(p => ({ ...p })); draw(); msg.textContent = ''; return; }
+    const act = (e.target.closest('[data-act]') || {}).dataset;
+    if (!act) return;
+    if (act.act === 'add') { parts = read(); parts.push({ rate: 18, taxable: 0 }); draw(); }
+    else if (act.act === 'del') { parts = read(); parts.splice(+e.target.closest('.tp-split-line').dataset.n, 1); draw(); }
+    else if (act.act === 'clear') { delete pushSplit[i]; pushSel.delete(i); tr.remove(); refreshPickState(); }
+    else if (act.act === 'apply') {
+      const r = BooksRecon.splitInvoice(k, read());
+      if (!r.ok) { msg.textContent = r.error; msg.className = 'tp-split-msg bad'; return; }
+      pushSplit[i] = r.lines;
+      tr.remove();
+      refreshPickState();
     }
   });
 }
@@ -245,50 +331,63 @@ function bindOnly2b() {
   }));
   document.getElementById('tp-all').addEventListener('change', e => {
     pushRows.forEach((k, i) => {
-      if (pushBlocker(k) || pushSent.has(i)) return;
+      if (pushBlocker(k, i) || pushSent.has(i)) return;
       e.target.checked ? pushSel.add(i) : pushSel.delete(i);
     });
     refreshPickState();
+  });
+  table.closest('details').addEventListener('click', e => {
+    const b = e.target.closest('.tp-split-btn');
+    if (b) openSplit(+b.dataset.i);
   });
   table.addEventListener('click', openPushPanel);
   refreshPickState();
 }
 
-// ── Posting settings (remembered) ───────────────────────────────────────────
+// ── Posting settings (remembered per company) ───────────────────────────────
 
-const CFG_FIELDS = [
+const COMMON_FIELDS = [
   ['voucherType',   'Purchase voucher type', 'Purchase'],
+  ['debitNoteType', 'Debit note voucher type (for credit notes)', 'Debit Note'],
+  ['cess',          'Input Cess ledger (only if an invoice has cess)', ''],
+];
+const SINGLE_FIELDS = [
   ['purchaseLedger','Purchase ledger', ''],
   ['cgst',          'Input CGST ledger', ''],
   ['sgst',          'Input SGST ledger', ''],
   ['igst',          'Input IGST ledger', ''],
-  ['cess',          'Input Cess ledger (if any cess)', ''],
-  ['debitNoteType', 'Debit note voucher type (for credit notes)', 'Debit Note'],
   ['returnLedger',  'Purchase return ledger (blank = purchase ledger)', ''],
 ];
+const RATE_FIELDS = [['purchase', 'Purchase ledger'], ['cgst', 'Input CGST'], ['sgst', 'Input SGST'], ['igst', 'Input IGST']];
 
+const cfgKey = () => 'gstr_tally_cfg_v2:' + (booksMeta.company || '');
 function loadCfg() {
-  try { return JSON.parse(localStorage.getItem(TALLY_CFG_KEY)) || {}; } catch (e) { return {}; }
+  const read = k => { try { return JSON.parse(localStorage.getItem(k)) || null; } catch (e) { return null; } };
+  return read(cfgKey()) || read(TALLY_CFG_KEY) || {};
 }
 function saveCfg(c) {
-  try { localStorage.setItem(TALLY_CFG_KEY, JSON.stringify(c)); } catch (e) { /* private mode — just don't remember */ }
+  try { localStorage.setItem(cfgKey(), JSON.stringify(c)); } catch (e) { /* private mode — just don't remember */ }
 }
 
 function readCfgForm() {
+  const val = id => ((document.getElementById(id) || {}).value || '').trim();
   const c = {};
-  CFG_FIELDS.forEach(([k, , def]) => {
-    const v = (document.getElementById('tcfg-' + k).value || '').trim();
-    c[k] = v || def;
-  });
+  COMMON_FIELDS.forEach(([k, , def]) => { c[k] = val('tcfg-' + k) || def; });
+  SINGLE_FIELDS.forEach(([k]) => { c[k] = val('tcfg-' + k); });
+  const mode = ((document.querySelector('input[name="tcfg-mode"]:checked') || {}).value) === 'single' ? 'single' : 'byRate';
+  const shown = {};
+  document.querySelectorAll('.trm').forEach(inp => { (shown[inp.dataset.rate] = shown[inp.dataset.rate] || {})[inp.dataset.field] = inp.value.trim(); });
+  const rateMap = { ...(loadCfg().rateMap || {}), ...shown };      // keep rates not on screen today
   return {
     voucherType: c.voucherType, debitNoteType: c.debitNoteType,
     purchaseLedger: c.purchaseLedger, returnLedger: c.returnLedger,
     taxLedgers: { cgst: c.cgst, sgst: c.sgst, igst: c.igst, cess: c.cess },
-    _flat: c,
+    mode, rateMap,
+    _flat: { ...c, mode, rateMap },
   };
 }
 
-/** Pre-fill empty ledger fields from the ledgers actually in Tally. */
+/** Pre-fill empty ledger fields (one-set mode) from the ledgers actually in Tally. */
 function suggestLedgers(ledgers) {
   const find = re => (ledgers.find(l => re.test(l.name)) || {}).name || '';
   return {
@@ -299,19 +398,48 @@ function suggestLedgers(ledgers) {
   };
 }
 
+/** Ledgers whose names carry this rate, e.g. "Input CGST @ 9%" for a rate of 18. */
+function suggestForRate(rate, ledgers) {
+  const has = r => { const re = new RegExp('(^|[^\\d.])' + fmtRate(r).replace('.', '\\.') + '(\\.0+)?\\s*%'); return n => re.test(n); };
+  const full = has(rate), half = has(rate / 2);
+  const pick = (re, fn) => (ledgers.find(l => re.test(l.name) && fn(l.name)) || {}).name || '';
+  return {
+    purchase: pick(/purchase/i, n => !/return/i.test(n) && full(n)),
+    cgst: pick(/cgst/i, n => !/output/i.test(n) && half(n)),
+    sgst: pick(/(sgst|utgst)/i, n => !/output/i.test(n) && half(n)),
+    igst: pick(/igst/i, n => !/output/i.test(n) && full(n)),
+  };
+}
+
+const looksRateWise = ledgers => ledgers.some(l => /(cgst|sgst|igst|purchase)[^%]*\d+(\.\d+)?\s*%/i.test(l.name));
+
 // ── The push panel: settings → preview → confirm → results ─────────────────
 
 function selectedVouchers() {
   return [...pushSel].sort((a, b) => a - b).map(i => {
     const k = pushRows[i];
+    const lines = pushSplit[i] || (k._rate === null ? null : [{ rate: k._rate, taxable: k.taxable, igst: k.igst, cgst: k.cgst, sgst: k.sgst, cess: k.cess }]);
     return {
       _row: i, date: BooksRecon.isoDate(k.date), invoiceNo: k.no, party: k.party, gstin: k.ctin, pos: k.pos,
-      taxable: k.taxable, igst: k.igst, cgst: k.cgst, sgst: k.sgst, cess: k.cess, kind: k.kind,
+      taxable: k.taxable, igst: k.igst, cgst: k.cgst, sgst: k.sgst, cess: k.cess, kind: k.kind, lines,
     };
   });
 }
 
 function wireVoucher(v) { const { _row, ...rest } = v; return rest; }
+
+/** The rates present in the selection, and which tax heads each needs. */
+function selectedRates() {
+  const m = new Map();
+  selectedVouchers().forEach(v => (v.lines || []).forEach(l => {
+    const key = fmtRate(l.rate);
+    const e = m.get(key) || { rate: l.rate, intra: false, inter: false };
+    if (l.cgst > 0 || l.sgst > 0) e.intra = true;
+    if (l.igst > 0) e.inter = true;
+    m.set(key, e);
+  }));
+  return [...m.values()].sort((a, b) => a.rate - b.rate);
+}
 
 async function openPushPanel() {
   const panel = document.getElementById('tally-push-panel');
@@ -329,12 +457,7 @@ async function openPushPanel() {
 }
 
 function readStoredCfgForPlan() {
-  const c = loadCfg();
-  return {
-    voucherType: c.voucherType || 'Purchase', debitNoteType: c.debitNoteType || 'Debit Note',
-    purchaseLedger: c.purchaseLedger || '', returnLedger: c.returnLedger || '',
-    taxLedgers: { cgst: c.cgst || '', sgst: c.sgst || '', igst: c.igst || '', cess: c.cess || '' },
-  };
+  return { voucherType: 'Purchase', debitNoteType: 'Debit Note', purchaseLedger: '', returnLedger: '', taxLedgers: {}, mode: 'single', rateMap: {} };
 }
 
 let knownLedgers = [];
@@ -349,21 +472,52 @@ function renderPushPanel(ledgers) {
     if (sug[k]) { suggested.push(k); return sug[k]; }
     return def;
   };
+  const mode = stored.mode || (looksRateWise(ledgers) ? 'byRate' : 'single');
   const options = ledgers.map(l => `<option value="${esc(l.name)}">${esc(l.parent)}</option>`).join('');
-  const fields = CFG_FIELDS.map(([k, label, def]) => `
-    <label class="tp-field"><span>${esc(label)}</span>
-      <input type="text" id="tcfg-${k}" list="tally-ledgers" value="${esc(val(k, def))}" autocomplete="off"></label>`).join('');
+  const input = (id, v, extra) => `<input type="text" id="${id}" list="tally-ledgers" value="${esc(v)}" autocomplete="off" ${extra || ''}>`;
+  const field = ([k, label, def]) => `<label class="tp-field"><span>${esc(label)}</span>${input('tcfg-' + k, val(k, def))}</label>`;
+
+  let rateSuggested = false;
+  const rateRows = selectedRates().map(r => {
+    const key = fmtRate(r.rate);
+    const saved = (stored.rateMap || {})[key] || {};
+    const guess = suggestForRate(r.rate, ledgers);
+    const cells = RATE_FIELDS.map(([f]) => {
+      const needed = f === 'purchase' || (f === 'igst' ? r.inter : r.intra) && r.rate > 0;
+      if (!needed) return '<td class="tp-na">–</td>';
+      let v = saved[f] || '';
+      if (!v && guess[f]) { v = guess[f]; rateSuggested = true; }
+      return `<td>${input('', v, `class="trm" data-rate="${esc(key)}" data-field="${f}" aria-label="${esc(key)}% ${f}"`).replace(' id=""', '')}</td>`;
+    }).join('');
+    return `<tr><td class="tp-ratecol">${esc(key)}%</td>${cells}</tr>`;
+  }).join('');
+
   document.getElementById('tally-push-panel').innerHTML = `
     <div class="tp-panel">
       <h4>Send to Tally</h4>
       <p class="bk-note">Posting into <b>${esc(booksMeta.company)}</b>. Vouchers are created in Tally exactly as previewed below — nothing is written until you confirm.</p>
       <datalist id="tally-ledgers">${options}</datalist>
-      <div class="tp-fields">${fields}</div>
-      ${suggested.length ? '<p class="bk-note">Some ledgers were suggested from your Tally ledger list — please check them. They are remembered in this browser.</p>' : ''}
+      <div class="tp-mode" role="radiogroup" aria-label="How ledgers are chosen">
+        <label><input type="radio" name="tcfg-mode" value="byRate" ${mode === 'byRate' ? 'checked' : ''}> Ledgers by rate</label>
+        <label><input type="radio" name="tcfg-mode" value="single" ${mode === 'single' ? 'checked' : ''}> One set of ledgers for every invoice</label>
+      </div>
+      <div class="tp-fields">${COMMON_FIELDS.map(field).join('')}</div>
+      <div id="tp-by-rate" ${mode === 'byRate' ? '' : 'hidden'}>
+        <div style="overflow-x:auto"><table class="bk-table tp-rates"><thead><tr><th>Rate</th>${RATE_FIELDS.map(([, l]) => `<th>${esc(l)}</th>`).join('')}</tr></thead><tbody>${rateRows}</tbody></table></div>
+        <p class="bk-note">Choose the ledgers Tally should use for each rate in this selection. Purchases at a rate go to that rate's purchase ledger; CGST and SGST (or IGST for inter-state) go to that rate's input ledgers. Credit notes use the same purchase ledgers.</p>
+      </div>
+      <div id="tp-single" ${mode === 'single' ? '' : 'hidden'}><div class="tp-fields">${SINGLE_FIELDS.map(field).join('')}</div></div>
+      ${(suggested.length || rateSuggested) ? '<p class="bk-note">Some ledgers were suggested from your Tally ledger names — please check them. Your choices are remembered for this company in this browser.</p>' : ''}
       <div class="tp-actions"><button type="button" class="btn-reset" id="btn-tally-preview">Refresh preview</button></div>
       <div id="tally-preview"></div>
     </div>`;
   document.getElementById('btn-tally-preview').addEventListener('click', refreshPreview);
+  document.querySelectorAll('input[name="tcfg-mode"]').forEach(r => r.addEventListener('change', () => {
+    const by = document.querySelector('input[name="tcfg-mode"]:checked').value === 'byRate';
+    document.getElementById('tp-by-rate').hidden = !by;
+    document.getElementById('tp-single').hidden = by;
+    refreshPreview();
+  }));
 }
 
 async function refreshPreview() {
@@ -372,6 +526,7 @@ async function refreshPreview() {
   saveCfg(cfg._flat);
   box.innerHTML = '<p class="bk-note">Checking against Tally…</p>';
   const vouchers = selectedVouchers();
+  const rateLabel = v => (v.lines || []).map(l => fmtRate(l.rate) + '%').join(' + ');
   try {
     const plan = await tallyRequest('plan', { vouchers: vouchers.map(wireVoucher), config: cfg }, 60000);
     const newCount = new Set(plan.items.filter(p => p.isNew).map(p => p.partyLedger)).size;
@@ -379,11 +534,23 @@ async function refreshPreview() {
       const p = plan.items[i];
       return `<tr><td>${esc(p.partyLedger)}${p.isNew ? '<span class="bk-badge warn">new ledger</span>' : ''}</td>
         <td>${esc(v.gstin)}</td><td>${esc(v.invoiceNo)}</td><td>${esc(dmy(BooksRecon.parseDate(v.date)))}</td>
+        <td>${esc(rateLabel(v))}</td>
         <td class="num">${money(v.taxable)}</td><td class="num">${money(v.igst + v.cgst + v.sgst + v.cess)}</td>
         <td class="num">${money(v.taxable + v.igst + v.cgst + v.sgst + v.cess)}</td>
         <td>${v.kind === 'CN' ? esc(cfg.debitNoteType) : esc(cfg.voucherType)}</td></tr>`;
     }).join('');
+    // totals by rate, so they can be compared with the ITC in GSTR-2B
+    const byRate = new Map();
+    vouchers.forEach(v => (v.lines || []).forEach(l => {
+      const key = fmtRate(l.rate), sign = v.kind === 'CN' ? -1 : 1;
+      const e = byRate.get(key) || { rate: l.rate, n: new Set(), taxable: 0, tax: 0 };
+      e.n.add(v._row); e.taxable += sign * l.taxable; e.tax += sign * (l.igst + l.cgst + l.sgst + l.cess);
+      byRate.set(key, e);
+    }));
+    const rateTable = [...byRate.values()].sort((a, b) => a.rate - b.rate).map(e =>
+      `<tr><td>${esc(fmtRate(e.rate))}%</td><td class="num">${e.n.size}</td><td class="num">${money(e.taxable)}</td><td class="num">${money(e.tax)}</td></tr>`).join('');
     const problems = [];
+    if ((plan.unmapped || []).length) problems.push(`Choose ledgers for: ${plan.unmapped.join('; ')}`);
     if (plan.missing.length) problems.push(`These ledgers are not in Tally — pick existing ones above: ${plan.missing.map(m => m || '(blank)').join(', ')}`);
     box.innerHTML = `
       <div class="summary-grid" style="grid-template-columns:repeat(3,1fr)">
@@ -392,12 +559,13 @@ async function refreshPreview() {
         <div class="summary-card"><div class="sc-label">Input tax booked</div><div class="sc-value">₹${money(vouchers.reduce((s, v) => s + (v.kind === 'CN' ? -1 : 1) * (v.igst + v.cgst + v.sgst + v.cess), 0))}</div><div class="sc-sub">net of debit notes</div></div>
       </div>
       ${problems.map(t => `<div class="notice notice-error" style="margin-bottom:10px"><span>${esc(t)}</span></div>`).join('')}
+      ${rateTable ? `<div style="overflow-x:auto"><table class="bk-table tp-ratesum"><thead><tr><th>Rate</th><th class="num">Vouchers</th><th class="num">Taxable</th><th class="num">Tax</th></tr></thead><tbody>${rateTable}</tbody></table></div>` : ''}
       <div style="overflow-x:auto"><table class="bk-table"><thead><tr>
-        <th>Supplier ledger</th><th>GSTIN</th><th>Invoice (reference)</th><th>Date</th><th class="num">Taxable</th><th class="num">Tax</th><th class="num">Total</th><th>Voucher</th>
+        <th>Supplier ledger</th><th>GSTIN</th><th>Invoice (reference)</th><th>Date</th><th>Rate</th><th class="num">Taxable</th><th class="num">Tax</th><th class="num">Total</th><th>Voucher</th>
       </tr></thead><tbody>${rows}</tbody></table></div>
       <div class="tp-actions">
-        <button type="button" class="btn-run" id="btn-tally-confirm" ${problems.length ? 'disabled' : ''}>Create ${vouchers.length} voucher${vouchers.length === 1 ? '' : 's'} in Tally</button>
-        <span class="run-hint">Check the first voucher in Tally (GST classification comes from your purchase ledger's settings).</span>
+        <button type="button" class="btn-run" id="btn-tally-confirm" ${problems.length || !vouchers.length ? 'disabled' : ''}>Create ${vouchers.length} voucher${vouchers.length === 1 ? '' : 's'} in Tally</button>
+        <span class="run-hint">Check the first voucher in Tally before booking the rest.</span>
       </div>
       <div id="tally-result"></div>`;
     const confirm = document.getElementById('btn-tally-confirm');

@@ -231,7 +231,89 @@
     };
   }
 
-  const api = { reconcile, flatten2B, normaliseBooks, normInvoiceNo, parseDate, cleanGstin, isoDate, AMOUNT_TOLERANCE, POSSIBLE_DAY_WINDOW };
+
+  // ── GST rate helpers (used when booking invoices into Tally) ────────────────
+  // GSTR-2B gives each invoice's taxable value and tax only — no rate — so the
+  // rate is worked out as tax ÷ taxable and matched to a standard rate.
+
+  const RATE_SLABS = [0, 0.1, 0.25, 1, 1.5, 3, 5, 6, 7.5, 12, 18, 28, 40];
+  const SPLIT_RATES = [0, 5, 12, 18, 28, 40];     // rates offered when suggesting how a mixed invoice splits
+  const rateTolerance = taxable => Math.max(0.05, taxable * 0.0015);   // paise floor, else 0.15 percentage points
+
+  /** The standard rate an invoice's tax implies, or null when it fits none (mixed rates). */
+  function impliedRate(taxable, tax) {
+    taxable = Number(taxable) || 0; tax = Number(tax) || 0;
+    if (!(taxable > 0)) return null;
+    if (!(tax > 0.005)) return 0;
+    let best = null;
+    RATE_SLABS.forEach(s => {
+      const d = Math.abs(tax - taxable * s / 100);
+      if (d <= rateTolerance(taxable) && (best === null || d < best.d)) best = { s, d };
+    });
+    return best ? best.s : null;
+  }
+
+  /**
+   * Two-rate splits that reproduce an invoice's taxable value and tax exactly,
+   * most plausible first. Several can fit mathematically, so they are ranked
+   * by how "round" the amounts are (invoices are usually written in whole
+   * rupees or tens), and a nil rate is never suggested.
+   */
+  function suggestSplits(taxable, tax) {
+    taxable = Number(taxable) || 0; tax = Number(tax) || 0;
+    const rates = SPLIT_RATES.filter(r => r > 0);
+    const out = [];
+    for (let i = 0; i < rates.length; i++) {
+      for (let j = i + 1; j < rates.length; j++) {
+        const r1 = rates[i], r2 = rates[j];
+        const t2 = (tax - taxable * r1 / 100) / ((r2 - r1) / 100);
+        const t1 = taxable - t2;
+        if (t1 < 0.5 || t2 < 0.5) continue;
+        const a = round2(t1), b = round2(taxable - a);
+        if (Math.abs((a * r1 + b * r2) / 100 - tax) > rateTolerance(taxable) + 0.01) continue;
+        out.push({ parts: [{ rate: r1, taxable: a }, { rate: r2, taxable: b }] });
+      }
+    }
+    // roundness: whole rupees beat paise; trailing zeros beat none
+    const roundness = n => (Math.abs(n - Math.round(n)) > 0.004 ? 100 : 0) + (Math.round(n) % 10 === 0 ? 0 : 1) + (Math.round(n) % 100 === 0 ? 0 : 1);
+    out.forEach(o => { o.score = roundness(o.parts[0].taxable) + roundness(o.parts[1].taxable); o.round = o.score < 100; });
+    return out.sort((x, y) => x.score - y.score);
+  }
+
+  /**
+   * Turn user-entered parts [{ rate, taxable }] into full rate lines whose
+   * tax heads add up exactly to the invoice's. { ok, lines } or { ok:false, error }.
+   * k: { taxable, igst, cgst, sgst, cess }
+   */
+  function splitInvoice(k, parts) {
+    parts = (parts || []).filter(p => Number(p.taxable) > 0);
+    if (parts.length < 1) return { ok: false, error: 'Add at least one line with a taxable value.' };
+    const T = round2(parts.reduce((s, p) => s + Number(p.taxable), 0));
+    if (Math.abs(T - k.taxable) > 1.01) return { ok: false, error: `The lines add up to ${T.toFixed(2)} taxable, but the invoice has ${Number(k.taxable).toFixed(2)}.` };
+    const heads = ['igst', 'cgst', 'sgst'];
+    const invTax = heads.reduce((s, h) => s + k[h], 0);
+    const lineTax = parts.map(p => Number(p.taxable) * Number(p.rate) / 100);
+    const sumTax = lineTax.reduce((s, x) => s + x, 0);
+    if (Math.abs(sumTax - invTax) > Math.max(1, k.taxable * 0.002)) {
+      return { ok: false, error: `These rates give ${sumTax.toFixed(2)} tax, but the invoice has ${invTax.toFixed(2)}. Check the rates and amounts.` };
+    }
+    const lines = parts.map((p, i) => {
+      const l = { rate: Number(p.rate), taxable: round2(Number(p.taxable)), igst: 0, cgst: 0, sgst: 0, cess: 0 };
+      heads.forEach(h => { l[h] = invTax > 0 ? round2(lineTax[i] * k[h] / invTax) : 0; });
+      return l;
+    });
+    // pin the totals to the invoice: the last line absorbs rounding
+    const last = lines[lines.length - 1];
+    last.taxable = round2(k.taxable - lines.slice(0, -1).reduce((s, l) => s + l.taxable, 0));
+    heads.forEach(h => { last[h] = round2(k[h] - lines.slice(0, -1).reduce((s, l) => s + l[h], 0)); });
+    // cess belongs to the highest-rate line
+    const top = lines.reduce((a, l) => (l.rate > a.rate ? l : a), lines[0]);
+    top.cess = round2(k.cess || 0);
+    if (lines.some(l => l.taxable < 0 || heads.some(h => l[h] < 0))) return { ok: false, error: 'The split does not fit the invoice. Check the amounts.' };
+    return { ok: true, lines };
+  }
+
+  const api = { reconcile, flatten2B, normaliseBooks, normInvoiceNo, parseDate, cleanGstin, isoDate, AMOUNT_TOLERANCE, POSSIBLE_DAY_WINDOW, RATE_SLABS, impliedRate, suggestSplits, splitInvoice };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.BooksRecon = api;
 })(typeof self !== 'undefined' ? self : this);
