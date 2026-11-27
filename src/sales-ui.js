@@ -52,7 +52,7 @@ async function importSalesFromTally() {
     if (!versionAtLeast(ext.version, SALES_EXT_VERSION)) {
       throw new Error(`Reading sales needs the GSTR extension v${SALES_EXT_VERSION} or later (you have v${ext.version}). Update or reload it, then refresh this page.`);
     }
-    const data = await tallyRequest('fetchSales',{ from: m[0], to: m[m.length - 1] }, 10 * 60 * 1000);
+    const data = dropRepeatedTallyRows(await tallyRequest('fetchSales', { from: m[0], to: m[m.length - 1] }, 10 * 60 * 1000));
     const company = (data.companies || [])[0] || '';
     const raw = Object.values(files.r1).map(f => f.data);
     salesResult = BooksRecon.reconcileSales(raw, data.rows);

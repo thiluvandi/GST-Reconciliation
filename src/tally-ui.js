@@ -67,6 +67,19 @@ window.addEventListener('message', e => {
 });
 
 /** Resolve once the extension has answered a ping; fail fast if it never does. */
+/**
+ * Extensions before 1.13.1 could get a month's vouchers twice when importing
+ * several months (TallyPrime returned later months with earlier ones). With
+ * those, a row identical in every field to one already seen is dropped.
+ */
+const RANGE_FIX_VERSION = '1.13.1';
+function dropRepeatedTallyRows(data) {
+  if (!data || !Array.isArray(data.rows) || versionAtLeast(ext.version, RANGE_FIX_VERSION)) return data;
+  const seen = new Set();
+  const rows = data.rows.filter(r => { const k = JSON.stringify(r); if (seen.has(k)) return false; seen.add(k); return true; });
+  return Object.assign({}, data, { rows });
+}
+
 function ensureExtension() {
   if (ext.ready) return Promise.resolve();
   return new Promise((resolve, reject) => {
@@ -148,7 +161,7 @@ async function importFromTally() {
     if (!versionAtLeast(ext.version, MIN_EXT_VERSION)) {
       throw new Error(`The GSTR extension (v${ext.version}) is too old — update to v${MIN_EXT_VERSION} or later.`);
     }
-    const data = await tallyRequest('fetchBooks', { from, to }, 10 * 60 * 1000);
+    const data = dropRepeatedTallyRows(await tallyRequest('fetchBooks', { from, to }, 10 * 60 * 1000));
     const company = (data.companies || [])[0] || '';
     const meta = { company, companyGstins: data.companyGstins || [] };
     setBooks(data.rows, `Tally – ${company || 'open company'}`, meta);

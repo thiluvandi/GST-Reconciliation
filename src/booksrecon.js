@@ -364,6 +364,114 @@
     return { invoices, months, totalsOnlyMonths: months.filter(m => m.totalsOnly).map(m => m.label), bookCount: books.length };
   }
 
+  // ── ITC: GSTR-3B claimed vs GSTR-2B available vs books ────────────────────
+
+  const HEADS = ['igst', 'cgst', 'sgst', 'cess'];
+  const zeroHeads = () => ({ igst: 0, cgst: 0, sgst: 0, cess: 0 });
+  const addHeads = (t, r, sign = 1) => { HEADS.forEach(h => { t[h] = round2(t[h] + sign * num(r[h])); }); return t; };
+  const portalFp = v => { const s = String(v || '').replace(/[^0-9]/g, ''); return s.length === 6 ? s : ''; };
+  const fpSortKey = fp => fp.slice(2) + fp.slice(0, 2);
+
+  /** GSTR-3B table 4 for one month. 3B writes cess as csamt and the heads as iamt/camt/samt. */
+  function flatten3BItc(raw) {
+    const inner = (raw && raw.data) || raw || {};
+    const fp = portalFp(inner.fp || inner.ret_period || (raw && (raw.fp || raw.ret_period)));
+    const elg = inner.itc_elg || {};
+    const heads = r => ({ igst: num(r.iamt), cgst: num(r.camt), sgst: num(r.samt), cess: num(r.csamt) });
+    const byType = {};
+    (elg.itc_avl || []).forEach(r => { const ty = String(r.ty || 'OTH').toUpperCase(); byType[ty] = addHeads(byType[ty] || zeroHeads(), heads(r)); });
+    const pick = (...tys) => tys.reduce((t, ty) => addHeads(t, byType[ty] || zeroHeads()), zeroHeads());
+    const reversed = (elg.itc_rev || []).reduce((t, r) => addHeads(t, heads(r)), zeroHeads());
+    return {
+      fp,
+      // Compared with 2B and the books: everything except tax paid under reverse charge.
+      claimed: pick('OTH', 'IMPG', 'ISD'),
+      other: pick('OTH'), imports: pick('IMPG'), isd: pick('ISD'),
+      // Reverse charge (ISRC) and import of services (IMPS) are paid in cash and never appear in 2B.
+      rcm: pick('ISRC', 'IMPS'),
+      reversed,
+      net: elg.itc_net ? heads(elg.itc_net) : addHeads(addHeads(pick('OTH', 'IMPG', 'ISD', 'ISRC', 'IMPS'), zeroHeads()), reversed, -1),
+    };
+  }
+
+  /** GSTR-2B ITC for one month, split the way table 4 of 3B is. */
+  function flatten2BItc(raw) {
+    const inner = (raw && raw.data) || raw || {};
+    const fp = portalFp(inner.rtnprd || inner.retPrd || (raw && (raw.rtnprd || raw.retPrd)));
+    const doc = inner.docdata || {};
+    const out = { fp, other: zeroHeads(), imports: zeroHeads(), isd: zeroHeads(), rcm: zeroHeads(), notAvailable: zeroHeads(), notAvailableCount: 0 };
+    flatten2B(raw).forEach(k => {
+      const sign = k.kind === 'CN' ? -1 : 1;
+      if (k.reverseCharge) addHeads(out.rcm, k, sign);
+      else if (!k.itcAvailable) { addHeads(out.notAvailable, k, sign); out.notAvailableCount++; }
+      else addHeads(out.other, k, sign);
+    });
+    ['impg', 'impgsez'].forEach(key => (doc[key] || []).forEach(r => addHeads(out.imports, { igst: r.igst, cess: r.cess })));
+    (doc.isd || doc.isda || []).forEach(sup => (sup.doclist || [sup]).forEach(d => {
+      if (d.itcelg === 'N') return;
+      addHeads(out.isd, d, /CN/i.test(d.doctyp || '') ? -1 : 1);
+    }));
+    out.available = addHeads(addHeads(addHeads(zeroHeads(), out.other), out.imports), out.isd);
+    return out;
+  }
+
+  /**
+   * Month by month: ITC claimed in GSTR-3B (table 4A, reverse charge left
+   * out) against ITC available in GSTR-2B and input tax booked in the
+   * purchase books (Tally leaves reverse charge out too). Any of the three
+   * may be missing for a month; it then shows as null.
+   *   diff2b    = 3B − 2B    (> 0: claimed more than 2B shows)
+   *   diffBooks = 3B − books (> 0: claimed more than booked)
+   */
+  function reconcileITC(raw3b, raw2b, booksRows) {
+    const list = v => (Array.isArray(v) ? v : v ? [v] : []);
+    const g3 = new Map(list(raw3b).map(flatten3BItc).filter(x => x.fp).map(x => [x.fp, x]));
+    const g2 = new Map(list(raw2b).map(flatten2BItc).filter(x => x.fp).map(x => [x.fp, x]));
+    const haveBooks = Array.isArray(booksRows);
+    const fps = [...new Set([...g3.keys(), ...g2.keys()])].sort((a, b) => fpSortKey(a).localeCompare(fpSortKey(b)));
+    const want = new Set(fps);
+    const booksByFp = new Map();
+    if (haveBooks) normaliseBooks(booksRows).forEach(b => {
+      const fp = fpOfDate(b.date);
+      if (!want.has(fp)) return;
+      addHeads(booksByFp.get(fp) || booksByFp.set(fp, zeroHeads()).get(fp), b, b.kind === 'CN' ? -1 : 1);
+    });
+    const diffOf = (a, b) => (a && b ? addHeads(addHeads(zeroHeads(), a), b, -1) : null);
+    const agreeAll = d => !d || HEADS.every(h => Math.abs(d[h]) <= AMOUNT_TOLERANCE);
+
+    const months = fps.map(fp => {
+      const t3 = g3.get(fp) || null, t2 = g2.get(fp) || null;
+      const claimed = t3 ? t3.claimed : null;
+      const available = t2 ? t2.available : null;
+      const books = haveBooks ? (booksByFp.get(fp) || zeroHeads()) : null;
+      const diff2b = diffOf(claimed, available), diffBooks = diffOf(claimed, books);
+      return {
+        fp, label: fpLabel(fp), claimed, available, books, diff2b, diffBooks,
+        rcm3b: t3 ? t3.rcm : null, reversed: t3 ? t3.reversed : null, net3b: t3 ? t3.net : null,
+        rcm2b: t2 ? t2.rcm : null, notAvailable2b: t2 ? t2.notAvailable : null, notAvailableCount: t2 ? t2.notAvailableCount : 0,
+        parts: { claimed: t3 && { other: t3.other, imports: t3.imports, isd: t3.isd }, available: t2 && { other: t2.other, imports: t2.imports, isd: t2.isd } },
+        agrees2b: agreeAll(diff2b), agreesBooks: agreeAll(diffBooks),
+      };
+    });
+
+    // The period total covers the months that have a 3B (the claims being checked);
+    // a column is left blank if any of those months lacks it.
+    const filed = months.filter(m => m.claimed);
+    const sumField = k => filed.reduce((t, m) => (m[k] ? addHeads(t, m[k]) : t), zeroHeads());
+    const all = k => filed.length > 0 && filed.every(m => m[k]);
+    const year = {
+      months: filed.map(m => m.label),
+      claimed: all('claimed') ? sumField('claimed') : null,
+      available: all('available') ? sumField('available') : null,
+      books: all('books') ? sumField('books') : null,
+      rcm3b: sumField('rcm3b'), reversed: sumField('reversed'), net3b: sumField('net3b'),
+    };
+    year.diff2b = diffOf(year.claimed, year.available);
+    year.diffBooks = diffOf(year.claimed, year.books);
+    year.agrees2b = agreeAll(year.diff2b); year.agreesBooks = agreeAll(year.diffBooks);
+    return { months, year, missing3b: fps.filter(fp => !g3.has(fp)).map(fpLabel), missing2b: fps.filter(fp => !g2.has(fp)).map(fpLabel) };
+  }
+
   /**
    * Suppliers whose invoices are in the books but not in 2B (they haven't
    * filed, or filed them wrong), with the ITC at stake — the list to chase.
@@ -486,7 +594,7 @@
     return { ok: true, lines };
   }
 
-  const api = { reconcile, reconcileSales, flattenR1, matchRecords, flatten2B, normaliseBooks, normInvoiceNo, invoiceWords, sameInvoiceLoosely, suppliersToChase, parseDate, cleanGstin, isoDate, AMOUNT_TOLERANCE, POSSIBLE_DAY_WINDOW, RATE_SLABS, impliedRate, suggestSplits, splitInvoice };
+  const api = { reconcile, reconcileSales, reconcileITC, flatten3BItc, flatten2BItc, flattenR1, matchRecords, flatten2B, normaliseBooks, normInvoiceNo, invoiceWords, sameInvoiceLoosely, suppliersToChase, parseDate, cleanGstin, isoDate, AMOUNT_TOLERANCE, POSSIBLE_DAY_WINDOW, RATE_SLABS, impliedRate, suggestSplits, splitInvoice };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.BooksRecon = api;
 })(typeof self !== 'undefined' ? self : this);
