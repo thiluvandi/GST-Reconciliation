@@ -11,6 +11,7 @@
 const BOOKS_TEMPLATE_HEADERS = ['Date', 'Voucher No', 'Supplier Invoice No', 'Party', 'GSTIN', 'Taxable', 'IGST', 'CGST', 'SGST', 'Cess', 'Total', 'Type'];
 
 let booksRows = [];
+let booksLoaded = false;   // true once a register has been loaded — even an empty one from Tally
 let booksLabel = '';
 let booksResult = null;
 // Which Tally company the rows came from (empty for a CSV/JSON file). Sending
@@ -86,6 +87,7 @@ function booksRowsFromCSV(text) {
 
 function setBooks(rows, label, meta) {
   booksRows = rows;
+  booksLoaded = true;
   booksLabel = label || 'purchase register';
   booksMeta = { company: (meta && meta.company) || '', companyGstins: (meta && meta.companyGstins) || [] };
   booksResult = null;
@@ -97,11 +99,15 @@ function refreshBooksControls() {
   const have2b = Object.keys(files['2b']).length;
   const run = document.getElementById('btn-books-run');
   const hint = document.getElementById('books-hint');
-  run.disabled = !(have2b && booksRows.length);
-  if (!have2b && !booksRows.length) hint.textContent = 'Load GSTR-2B above, then import your purchase register from Tally.';
-  else if (!have2b) hint.textContent = `${booksRows.length} purchase entries loaded from ${booksLabel} — now add GSTR-2B files above.`;
-  else if (!booksRows.length) hint.textContent = `${have2b} GSTR-2B month${have2b === 1 ? '' : 's'} loaded — now import the purchase register from Tally.`;
-  else hint.textContent = `${booksRows.length} purchase entries (${booksLabel}) vs ${have2b} GSTR-2B month${have2b === 1 ? '' : 's'} — ready.`;
+  run.disabled = !(have2b && booksLoaded);
+  const months = `${have2b} GSTR-2B month${have2b === 1 ? '' : 's'}`;
+  if (!have2b && !booksLoaded) hint.textContent = 'Load GSTR-2B above, then import your purchase register from Tally.';
+  else if (!have2b) hint.textContent = booksRows.length
+    ? `${booksRows.length} purchase entries loaded from ${booksLabel} — now add GSTR-2B files above.`
+    : `${booksLabel} has no purchase entries for that period — now add GSTR-2B files above.`;
+  else if (!booksLoaded) hint.textContent = `${months} loaded — now import the purchase register from Tally.`;
+  else if (!booksRows.length) hint.textContent = `${booksLabel} has no purchase entries for that period — every GSTR-2B invoice will be shown as missing from your books.`;
+  else hint.textContent = `${booksRows.length} purchase entries (${booksLabel}) vs ${months} — ready.`;
 }
 
 function booksNotice(type, text) {
@@ -218,8 +224,16 @@ function downloadBooksCSV() {
 
 // ── Wiring ──────────────────────────────────────────────────────────────────
 
-function runBooksRecon() {
-  document.getElementById('books-notices').innerHTML = '';
+// opts.keepNotices: the caller has just put notices on screen (e.g. the Tally
+// import) and wants them to survive the comparison.
+function runBooksRecon(opts) {
+  const keep = !!(opts && opts.keepNotices === true);
+  if (!keep) {
+    document.getElementById('books-notices').innerHTML = '';
+    if (booksLoaded && !booksRows.length) {
+      booksNotice('info', 'There are no purchase entries in the register, so every GSTR-2B invoice is shown as missing from your books. If you expected entries, check the right company and dates were loaded.');
+    }
+  }
   try {
     const raw2b = Object.values(files['2b']).map(f => f.data);
     booksResult = BooksRecon.reconcile(raw2b, booksRows);
@@ -248,7 +262,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  document.getElementById('btn-books-run').addEventListener('click', runBooksRecon);
+  document.getElementById('btn-books-run').addEventListener('click', () => runBooksRecon());
 
   document.getElementById('btn-books-template').addEventListener('click', () => {
     const sample = [BOOKS_TEMPLATE_HEADERS, ['05-04-2025', 'P-001', 'INV/0012', 'Alpha Traders', '29AAAAA1111A1Z5', '10000', '0', '900', '900', '0', '11800', 'Purchase'],

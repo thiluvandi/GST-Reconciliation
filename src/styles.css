@@ -139,6 +139,7 @@ main { max-width: 1200px; margin: 0 auto; padding: 32px 24px 56px; }
 }
 .notice-error { background: var(--red-light); border: 1px solid #fca5a5; color: var(--red); }
 .notice-warn  { background: var(--amber-light); border: 1px solid #fcd34d; color: var(--amber); }
+.notice-info  { background: #eaf3ff; border: 1px solid #93c5fd; color: #1d4ed8; }
 .notice-x {
   border: none; background: none; cursor: pointer;
   font-size: 15px; line-height: 1; color: inherit; opacity: 0.6; flex-shrink: 0;

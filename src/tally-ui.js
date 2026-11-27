@@ -147,20 +147,21 @@ async function importFromTally() {
     }
     const data = await tallyRequest('fetchBooks', { from, to }, 10 * 60 * 1000);
     const company = (data.companies || [])[0] || '';
-    if (!data.rows.length) {
-      booksNotice('warn', 'Tally returned no purchase entries with input GST for that period. Check the right company and dates are open in Tally.');
-      return;
-    }
     const meta = { company, companyGstins: data.companyGstins || [] };
     setBooks(data.rows, `Tally – ${company || 'open company'}`, meta);
     const mine = twoBGstins();
-    if (mine.length && meta.companyGstins.length && !meta.companyGstins.some(g => mine.includes(g))) {
+    if (!data.rows.length) {
+      // An empty register is a valid starting point: every 2B invoice is then
+      // "in 2B, not in books" and can be booked from the list below.
+      booksNotice('info', `Tally has no purchase entries with input GST for ${from} to ${to}${company ? ' in ' + company : ''}, so every GSTR-2B invoice is shown as missing from your books. If you expected entries, check the right company and dates are open in Tally.`);
+      if (mine.length) booksNotice('warn', `With no entries Tally gives no GSTIN to check, so make sure the open company${company ? ' (' + company + ')' : ''} is the one for GSTIN ${mine.join(', ')} before booking anything into it.`);
+    } else if (mine.length && meta.companyGstins.length && !meta.companyGstins.some(g => mine.includes(g))) {
       booksNotice('warn', `Tally's open company (GSTIN ${meta.companyGstins.join(', ')}) does not match the GSTR-2B files (GSTIN ${mine.join(', ')}). Make sure the right company is open.`);
     }
     if (data.stats && data.stats.rcmOnly) {
       booksNotice('warn', `${data.stats.rcmOnly} reverse-charge entr${data.stats.rcmOnly === 1 ? 'y was' : 'ies were'} left out (no input credit in GSTR-2B).`);
     }
-    if (Object.keys(files['2b']).length) runBooksRecon();
+    if (Object.keys(files['2b']).length) runBooksRecon({ keepNotices: true });
   } catch (err) {
     booksNotice('error', err.message);
   } finally {
