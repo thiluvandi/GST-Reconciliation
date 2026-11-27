@@ -410,3 +410,32 @@ td.status-mismatch { color: var(--red); font-family: var(--sans); font-weight: 6
 .tp-more summary { cursor: pointer; color: var(--ink-2); font-weight: 600; }
 .tp-mode .tp-sub { font-weight: 400; }
 .tp-intro { margin: 2px 0 10px; font-size: 12.5px; color: var(--ink-2); max-width: 760px; line-height: 1.5; }
+
+/* Tally panel: step 2 tax ledgers shown as text, and the toggle that makes them editable */
+.tp-lines td.tp-auto { font-family: var(--sans); color: var(--ink-2); }
+.tp-toggle { display: inline-flex; align-items: center; gap: 6px; margin: 0 0 8px; font-size: 12.5px; font-weight: 600; color: var(--ink-2); cursor: pointer; }
+
+/* After a push: changed summary cards pop, count to the new number and show the change */
+.summary-grid { position: relative; }
+.summary-card { position: relative; }
+.summary-card.sc-changed { animation: sc-pop .75s cubic-bezier(.2, .9, .3, 1.35) both; }
+@keyframes sc-pop {
+  0%   { transform: scale(1); }
+  35%  { transform: scale(1.07); box-shadow: 0 10px 28px rgba(22, 163, 74, .28); }
+  100% { transform: scale(1); box-shadow: 0 0 0 2px rgba(22, 163, 74, .35); }
+}
+.sc-delta { position: absolute; top: 10px; right: 10px; font: 700 12px/1 var(--mono); padding: 4px 8px; border-radius: 10px; animation: sc-delta-in .45s ease-out .55s both; }
+.sc-delta.good { background: var(--green-light); color: var(--green); }
+.sc-delta.bad  { background: var(--amber-light); color: var(--amber); }
+@keyframes sc-delta-in { from { opacity: 0; transform: translateY(8px) scale(.8); } to { opacity: 1; transform: none; } }
+.tp-burst { position: absolute; left: 50%; top: 40%; width: 0; height: 0; pointer-events: none; z-index: 5; }
+.tp-burst i { position: absolute; width: 7px; height: 11px; border-radius: 2px; background: var(--c); animation: tp-fly 1.3s cubic-bezier(.12, .75, .3, 1) both; }
+@keyframes tp-fly {
+  from { transform: translate(0, 0) rotate(0); opacity: 1; }
+  80%  { opacity: 1; }
+  to   { transform: translate(var(--dx), calc(var(--dy) + 60px)) rotate(var(--r)); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .summary-card.sc-changed, .sc-delta { animation: none; }
+  .tp-burst { display: none; }
+}

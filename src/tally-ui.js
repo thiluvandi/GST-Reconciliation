@@ -418,7 +418,13 @@ function suggestForRate(rate, ledgers) {
   };
 }
 
-const looksRateWise = ledgers => ledgers.some(l => /(cgst|sgst|igst|purchase)[^%]*\d+(\.\d+)?\s*%/i.test(l.name));
+/** Name for a rate's ledger when Tally has none: 18% → "Input CGST @ 9%", "Input IGST @ 18%", "Purchase @ 18%". */
+function standardLedgerName(field, rate) {
+  const full = fmtRate(rate), half = fmtRate(rate / 2);
+  return { purchase: `Purchase @ ${full}%`, cgst: `Input CGST @ ${half}%`, sgst: `Input SGST @ ${half}%`, igst: `Input IGST @ ${full}%` }[field] || '';
+}
+
+const looksRateWise =ledgers => ledgers.some(l => /(cgst|sgst|igst|purchase)[^%]*\d+(\.\d+)?\s*%/i.test(l.name));
 
 // ── The push panel: settings → preview → confirm → results ─────────────────
 
@@ -478,6 +484,7 @@ let knownLedgers = [];
 let planItems = [];             // supplier ledger per selected invoice, as Tally resolved it
 let lineOverrides = {};         // "row:line" -> { field: ledger } typed against one invoice line
 let partyOverrides = {};        // row -> supplier ledger typed for that invoice (e.g. an existing "Act Fiber Net")
+let editTaxPerInvoice = false;  // step 2 shows tax ledgers as text unless this is ticked
 let lineIndex = new Map();      // "row:line" -> { v, l }
 let previewTimer = null;
 
@@ -525,9 +532,10 @@ function invoiceTableHTML() {
       const head = n === 0 ? `
         <td rowspan="${lines.length}"><div class="tp-party">${partyCell}<div class="tp-party-meta"><span class="tp-party-badge">${party.isNew ? '<span class="bk-badge warn">new ledger</span>' : ''}</span><span class="tp-party-reset">${partyResetHTML(v._row)}</span></div></div></td>
         <td rowspan="${lines.length}">${esc(v.invoiceNo)}${v.kind === 'CN' ? '<div class="tp-sub">Credit note → Debit Note</div>' : ''}</td>` : '';
-      const cells = LINE_FIELDS.map(([f, label]) => needsField(l, f)
-        ? `<td><input type="text" class="tl${f in ovr ? ' ovr' : ''}" list="tally-ledgers" data-key="${key}" data-field="${f}" value="${esc(eff[f])}" autocomplete="off" aria-label="${esc(v.invoiceNo)} ${esc(label)}"></td>`
-        : '<td class="tp-na">–</td>').join('');
+      // Tax ledgers follow step 1 and show as text; they become boxes only when asked for (or already changed).
+      const cells = LINE_FIELDS.map(([f, label]) => !needsField(l, f) ? '<td class="tp-na">–</td>'
+        : (f !== 'purchase' && !editTaxPerInvoice && !(f in ovr)) ? `<td class="tp-auto">${esc(eff[f])}</td>`
+        : `<td><input type="text" class="tl${f in ovr ? ' ovr' : ''}" list="tally-ledgers" data-key="${key}" data-field="${f}" value="${esc(eff[f])}" autocomplete="off" aria-label="${esc(v.invoiceNo)} ${esc(label)}"></td>`).join('');
       const reset = Object.keys(ovr).length ? `<button type="button" class="tp-link" data-reset="${key}">Reset</button>` : '';
       return `<tr>${head}<td>${esc(fmtRate(l.rate))}%</td><td class="num">${money(l.taxable)}</td>
         <td class="num">${money(l.igst + l.cgst + l.sgst + l.cess)}</td>${cells}<td class="tp-reset">${reset}</td></tr>`;
@@ -563,6 +571,7 @@ function schedulePreview() {
 
 function renderPushPanel(ledgers) {
   knownLedgers = ledgers;
+  editTaxPerInvoice = false;
   const stored = loadCfg();
   const sug = suggestLedgers(ledgers);
   const suggested = [];
@@ -586,6 +595,8 @@ function renderPushPanel(ledgers) {
       if (!needed) return '<td class="tp-na">–</td>';
       let v = saved[f] || '';
       if (!v && guess[f]) { v = guess[f]; rateSuggested = true; }
+      // Nothing in Tally for this rate: name it from the rate; the extension creates it on Create.
+      if (!v && canCreateLedgers()) v = standardLedgerName(f, r.rate);
       return `<td>${input(`class="trm tdef" data-rate="${esc(key)}" data-field="${f}" aria-label="${esc(key)}% ${f}"`, v)}</td>`;
     }).join('');
     return `<tr><td class="tp-ratecol">${esc(key)}%</td>${cells}</tr>`;
@@ -599,7 +610,7 @@ function renderPushPanel(ledgers) {
       <datalist id="tally-ledgers">${options}</datalist>
 
       <div class="tp-step">1. Your usual purchase and tax ledgers</div>
-      <p class="tp-intro">Set these once. Every invoice in step 2 is filled in with them, so you don't type the same ledgers on each row — you only change the invoices that are different. They are remembered for <b>${esc(booksMeta.company)}</b> in this browser.${(suggested.length || rateSuggested) ? ' Some were guessed from your Tally ledger names; check them.' : ''}</p>
+      <p class="tp-intro">Set these once. Every invoice in step 2 is filled in with them, so you don't type the same ledgers on each row — you only change the invoices that are different. They are remembered for <b>${esc(booksMeta.company)}</b> in this browser.${(suggested.length || rateSuggested) ? ' Some were guessed from your Tally ledger names; check them.' : ''}${canCreateLedgers() ? ' Where Tally has no ledger for a rate, a name like <i>Input CGST @ 9%</i> is filled in from the rate and created for you.' : ''}</p>
       <div class="tp-mode" role="radiogroup" aria-label="How the usual ledgers are chosen">
         <label><input type="radio" name="tcfg-mode" value="byRate" ${mode === 'byRate' ? 'checked' : ''}> Separate ledgers for each GST rate <span class="tp-sub">(e.g. Purchase @ 18 %, INPUT CGST @ 9%)</span></label>
         <label><input type="radio" name="tcfg-mode" value="single" ${mode === 'single' ? 'checked' : ''}> The same ledgers for every rate</label>
@@ -617,6 +628,7 @@ function renderPushPanel(ledgers) {
 
       <div class="tp-step">2. Check each invoice</div>
       <p class="tp-intro">Each row is filled in from step 1. Change a box only for an invoice that goes somewhere else; changed boxes turn yellow and can be reset.${canCreateLedgers() ? ' <b>Supplier ledger</b>: pick any ledger already in Tally (for example Act Fiber Net for Atria), or type a new name to create one. Any ledger name that is not in Tally is created when you click Create.' : ''}</p>
+      <label class="tp-toggle"><input type="checkbox" id="tp-edit-tax"> Change tax ledgers on single invoices</label>
       <div id="tp-lines"></div>
 
       <div class="tp-step">3. Check and create <span class="run-hint" id="tp-preview-state"></span></div>
@@ -651,11 +663,13 @@ function renderPushPanel(ledgers) {
       schedulePreview();
     } else if (t.classList.contains('tdef')) {
       syncLineInputs();
+      document.querySelectorAll('.tp-lines .tp-auto').length && redrawInvoiceTable();   // text cells follow step 1 too
       schedulePreview();
     }
   });
   panel.addEventListener('change', e => {
     if (e.target.id === 'tcfg-newLedgerGroup') schedulePreview();
+    if (e.target.id === 'tp-edit-tax') { editTaxPerInvoice = e.target.checked; redrawInvoiceTable(); }
   });
   panel.addEventListener('click', e => {
     const pr = e.target.closest('[data-party-reset]');
@@ -695,6 +709,8 @@ async function refreshPreview() {
     });
     const newCount = new Set(plan.items.filter(p => p.isNew).map(p => p.partyLedger)).size;
     const toCreate = plan.create || [];
+    const already = plan.already || [];                 // invoices Tally already has: skipped on Create
+    const toBook = vouchers.length - already.length;
     const byRate = new Map();
     vouchers.forEach(v => (v.lines || []).forEach(l => {
       const key = fmtRate(l.rate), sign = v.kind === 'CN' ? -1 : 1;
@@ -709,16 +725,18 @@ async function refreshPreview() {
     if (plan.missing.length) problems.push(`These ledgers are not in Tally — pick existing ones: ${plan.missing.map(m => m || '(blank)').join(', ')}`);
     box.innerHTML = `
       <div class="summary-grid" style="grid-template-columns:repeat(3,1fr)">
-        <div class="summary-card"><div class="sc-label">Vouchers to create</div><div class="sc-value">${vouchers.length}</div><div class="sc-sub">${esc(booksMeta.company)}</div></div>
+        <div class="summary-card"><div class="sc-label">Vouchers to create</div><div class="sc-value">${toBook}</div><div class="sc-sub">${esc(booksMeta.company)}</div></div>
         <div class="summary-card"><div class="sc-label">New supplier ledgers</div><div class="sc-value ${newCount ? 'mismatch' : 'match'}">${newCount}</div><div class="sc-sub">created under Sundry Creditors</div></div>
         <div class="summary-card"><div class="sc-label">Input tax booked</div><div class="sc-value">₹${money(vouchers.reduce((s, v) => s + (v.kind === 'CN' ? -1 : 1) * (v.igst + v.cgst + v.sgst + v.cess), 0))}</div><div class="sc-sub">net of debit notes</div></div>
       </div>
       ${problems.map(t => `<div class="notice notice-error" style="margin-bottom:10px"><span>${esc(t)}</span></div>`).join('')}
+      ${already.length ? `<div class="notice notice-warn" style="margin-bottom:10px"><span>Already in Tally, so they will be skipped (not booked twice): ${
+        already.map(a => `<b>${esc(a.invoiceNo)}</b> (voucher ${esc(a.voucherNo)}, ${esc(a.party)})`).join(', ')}.</span></div>` : ''}
       ${toCreate.length ? `<div class="notice notice-warn" style="margin-bottom:10px"><span>These ledgers are not in Tally and will be created: ${
         toCreate.map(c => `<b>${esc(c.name)}</b> (${esc(c.group)}${c.role === 'purchase' ? '' : ', GST ' + esc(c.role.toUpperCase())})`).join(', ')}. To use an existing ledger instead, pick it from the list.</span></div>` : ''}
       ${rateTable ? `<div style="overflow-x:auto"><table class="bk-table tp-ratesum"><thead><tr><th>Rate</th><th class="num">Vouchers</th><th class="num">Taxable</th><th class="num">Tax</th></tr></thead><tbody>${rateTable}</tbody></table></div>` : ''}
       <div class="tp-actions">
-        <button type="button" class="btn-run" id="btn-tally-confirm" ${problems.length || !vouchers.length ? 'disabled' : ''}>Create ${vouchers.length} voucher${vouchers.length === 1 ? '' : 's'} in Tally</button>
+        <button type="button" class="btn-run" id="btn-tally-confirm" ${problems.length || !toBook ? 'disabled' : ''}>Create ${toBook} voucher${toBook === 1 ? '' : 's'} in Tally</button>
         <span class="run-hint">Check the first voucher in Tally before booking the rest.</span>
       </div>
       <div id="tally-result"></div>`;
@@ -752,20 +770,98 @@ async function confirmPush(vouchers, cfg) {
     out.innerHTML = `<div class="notice notice-error"><span>Stopped after ${results.length} of ${vouchers.length}: ${esc(err.message)}</span></div>`;
   }
 
-  results.filter(r => r.ok).forEach(r => { pushSent.add(r._row); pushSel.delete(r._row); });
+  results.filter(r => r.ok || r.skipped).forEach(r => { pushSent.add(r._row); pushSel.delete(r._row); });
   refreshPickState();
-  const ok = results.filter(r => r.ok), bad = results.filter(r => !r.ok);
+  const ok = results.filter(r => r.ok), skipped = results.filter(r => r.skipped), bad = results.filter(r => !r.ok && !r.skipped);
   const made = results.filter(r => r.ledgerCreated).length;
   btn.textContent = 'Done';
+  const summary = `${ok.length} voucher${ok.length === 1 ? '' : 's'} created in Tally${made ? `, ${made} new supplier ledger${made === 1 ? '' : 's'}` : ''}${ledgersMade.length ? `, ${ledgersMade.length} new purchase/tax ledger${ledgersMade.length === 1 ? '' : 's'} (${ledgersMade.join(', ')})` : ''}${skipped.length ? `, ${skipped.length} skipped as already in Tally` : ''}${bad.length ? `, ${bad.length} failed` : ''}.`;
+  // Everything went in: read Tally again straight away and show the new numbers.
+  // (With failures, stay here so the failed invoices and their reasons remain on screen.)
+  if ((ok.length || skipped.length) && !bad.length && results.length === vouchers.length) {
+    btn.textContent = 'Done — refreshing from Tally…';
+    await refreshAfterPush(summary + ' Your books were re-read from Tally:');
+    return;
+  }
   out.insertAdjacentHTML('afterbegin', `
-    <div class="notice ${bad.length ? 'notice-warn' : 'notice-ok'}" style="margin:12px 0"><span>
-      ${ok.length} voucher${ok.length === 1 ? '' : 's'} created in Tally${made ? `, ${made} new supplier ledger${made === 1 ? '' : 's'}` : ''}${ledgersMade.length ? `, ${ledgersMade.length} new purchase/tax ledger${ledgersMade.length === 1 ? '' : 's'} (${esc(ledgersMade.join(', '))})` : ''}${bad.length ? `, ${bad.length} failed` : ''}.
-    </span></div>
+    <div class="notice ${bad.length ? 'notice-warn' : 'notice-ok'}" style="margin:12px 0"><span>${esc(summary)}</span></div>
     ${bad.length ? `<div style="overflow-x:auto"><table class="bk-table"><thead><tr><th>Invoice</th><th>Supplier</th><th>Problem</th></tr></thead><tbody>${
       bad.map(r => `<tr><td>${esc(r.invoiceNo)}</td><td>${esc(r.party)}</td><td>${esc(r.error)}</td></tr>`).join('')}</tbody></table></div>` : ''}
     ${ok.length ? '<div class="tp-actions"><button type="button" class="btn-run" id="btn-tally-reimport">Re-import from Tally and reconcile again</button></div>' : ''}`);
   const re = document.getElementById('btn-tally-reimport');
   if (re) re.addEventListener('click', importFromTally);
+}
+
+// ── After a push: re-read Tally and show what changed ───────────────────────
+
+/** The summary cards' numbers, by label. */
+function cardNumbers() {
+  const m = {};
+  document.querySelectorAll('#books-results .summary-card').forEach(c => {
+    m[c.querySelector('.sc-label').textContent] = parseInt(c.querySelector('.sc-value').textContent.replace(/[^\d-]/g, ''), 10) || 0;
+  });
+  return m;
+}
+
+async function refreshAfterPush(message) {
+  const before = cardNumbers();
+  await importFromTally();                 // re-reads Tally and redraws the comparison
+  booksNotice('ok', message + ' ' + cardChangesText(before));
+  celebrateCards(before);
+}
+
+function cardChangesText(before) {
+  const after = cardNumbers();
+  const moved = Object.keys(after).filter(k => k in before && before[k] !== after[k]).map(k => `${k} ${before[k]} → ${after[k]}`);
+  return moved.length ? moved.join(', ') + '.' : 'no change in the counts.';
+}
+
+/** Count each changed card from its old number to the new one, flag the change, and a short burst. */
+function celebrateCards(before) {
+  const grid = document.querySelector('#books-results .summary-grid');
+  if (!grid) return;
+  grid.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const calm = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let any = false;
+  grid.querySelectorAll('.summary-card').forEach((card, i) => {
+    const label = card.querySelector('.sc-label').textContent;
+    const el = card.querySelector('.sc-value');
+    const to = parseInt(el.textContent.replace(/[^\d-]/g, ''), 10) || 0;
+    if (!(label in before) || before[label] === to) return;
+    any = true;
+    const from = before[label], d = to - from;
+    const good = label === 'Matched' ? d > 0 : d < 0;      // more matched, fewer exceptions
+    card.classList.add('sc-changed');
+    card.style.animationDelay = (i * 90) + 'ms';
+    card.insertAdjacentHTML('beforeend', `<span class="sc-delta ${good ? 'good' : 'bad'}">${d > 0 ? '+' : '−'}${Math.abs(d)}</span>`);
+    if (calm) return;
+    const start = performance.now() + i * 90, dur = 1100;
+    el.textContent = from;
+    (function tick(now) {
+      const t = Math.min(1, Math.max(0, (now - start) / dur));
+      el.textContent = Math.round(from + d * (1 - Math.pow(1 - t, 3)));
+      if (t < 1) requestAnimationFrame(tick);
+    })(performance.now());
+  });
+  if (any && !calm) burst(grid);
+}
+
+function burst(host) {
+  const box = document.createElement('div');
+  box.className = 'tp-burst';
+  const colours = ['#16a34a', '#f59e0b', '#2563eb', '#e11d48', '#facc15', '#0d9488'];
+  for (let i = 0; i < 46; i++) {
+    const p = document.createElement('i');
+    const a = Math.random() * Math.PI * 2, dist = 90 + Math.random() * 220;
+    p.style.setProperty('--dx', Math.cos(a) * dist + 'px');
+    p.style.setProperty('--dy', Math.sin(a) * dist * 0.6 - 40 + 'px');
+    p.style.setProperty('--r', (Math.random() * 720 - 360) + 'deg');
+    p.style.setProperty('--c', colours[i % colours.length]);
+    p.style.animationDelay = Math.random() * 120 + 'ms';
+    box.appendChild(p);
+  }
+  host.appendChild(box);
+  setTimeout(() => box.remove(), 1800);
 }
 
 // ── Wiring ──────────────────────────────────────────────────────────────────
