@@ -47,6 +47,28 @@
     return alnum.replace(/\d+/g, d => d.replace(/^0+(?=\d)/, ''));
   }
 
+  /**
+   * Are two invoice numbers the same document written with extra bits?
+   * Suppliers and accountants add prefixes and suffixes ("INV/24-25/0123"
+   * in 2B, "001" in books; "0123/24-25" vs "INV-123/24-25"). Both are split
+   * into words — at separators and where letters meet digits, leading zeros
+   * dropped — and the shorter must be the whole start or the whole end of the
+   * longer and contain a number. So "12" never matches "112", and
+   * "CSG/26-27/001" matches "1" or "001". Used only together with matching
+   * GSTIN, amounts and dates.
+   */
+  function invoiceWords(v) {
+    return (String(v || '').toUpperCase().match(/[A-Z]+|\d+/g) || []).map(w => (/^\d/.test(w) ? w.replace(/^0+(?=\d)/, '') : w));
+  }
+  function sameInvoiceLoosely(a, b) {
+    const x = invoiceWords(a), y = invoiceWords(b);
+    if (!x.length || !y.length) return false;
+    const [s, l] = x.length <= y.length ? [x, y] : [y, x];
+    if (!s.some(w => /^\d/.test(w))) return false;
+    const at = off => s.every((w, i) => w === l[off + i]);
+    return at(0) || at(l.length - s.length);
+  }
+
   /** Accepts dd-mm-yyyy, dd/mm/yyyy, yyyy-mm-dd and Tally's yyyymmdd. Returns a Date (UTC) or null. */
   function parseDate(v) {
     const s = String(v || '').trim();
@@ -170,6 +192,24 @@
       pair('tier1', b, cands[0]);
     });
 
+    // Tier 1b — "smart" match: same GSTIN, the amounts agree, dates close, and
+    // the invoice numbers are the same apart from an added prefix/suffix
+    // (sameInvoiceLoosely). Counted as matched, but marked so it can be seen.
+    // Only when exactly one 2B entry fits this book entry and that 2B entry
+    // fits no other book entry — never a guess between two.
+    const smartFits = (b, k) => !used2b.has(k) && k.kind === b.kind && k.ctin === b.ctin
+      && close(k.taxable, b.taxable) && close(taxOf(k), taxOf(b))
+      && daysBetween(k.date, b.date) <= POSSIBLE_DAY_WINDOW && sameInvoiceLoosely(k.no, b.no);
+    const openBooks = books.filter(b => !usedBooks.has(b) && b.ctin);
+    openBooks.forEach(b => {
+      const cands = recs.filter(k => smartFits(b, k));
+      if (cands.length !== 1) return;
+      if (openBooks.filter(o => !usedBooks.has(o) && smartFits(o, cands[0])).length !== 1) return;
+      used2b.add(cands[0]); usedBooks.add(b);
+      result.matched.push({ books: b, twoB: cands[0], diff: compareAmounts(b, cands[0]).diff, smart: true,
+        note: `Smart match: invoice no. written as "${b.no}" in books, "${cands[0].no}" in 2B` });
+    });
+
     // Tier 2 — books entries with no usable GSTIN: invoice number + amount.
     // Without a GSTIN a bare invoice number is far too weak to trust ("1",
     // "2" … collide across suppliers), so amount must agree too, and the
@@ -191,10 +231,18 @@
       if (cands.length === 1) pair('tier3', b, cands[0], 'Invoice number differs');
     });
 
-    // Leftovers.
+    // Leftovers. A leftover book entry with the same invoice number and amount
+    // as one that already matched (same GSTIN, or no GSTIN at all) is the
+    // same invoice booked a second time — our duplicate, not a supplier that
+    // hasn't filed — so it gets its own list and stays out of "ITC at risk".
+    const settled = result.matched.concat(result.differs).map(e => e.books);
+    result.bookedTwice = [];
     recs.filter(k => !used2b.has(k)).forEach(k => result.only2b.push(k));
     books.filter(b => !usedBooks.has(b)).forEach(b => {
-      (b.ctin ? result.onlyBooks : result.noGstin).push(b);
+      const first = settled.find(m => m.kind === b.kind && normInvoiceNo(m.no) === normInvoiceNo(b.no) && normInvoiceNo(b.no)
+        && close(m.total, b.total) && (!b.ctin || b.ctin === m.ctin));
+      if (first) result.bookedTwice.push({ books: b, first });
+      else (b.ctin ? result.onlyBooks : result.noGstin).push(b);
     });
 
     // Same supplier invoice entered twice in books is worth calling out.
@@ -210,15 +258,34 @@
     return result;
   }
 
+  /**
+   * Suppliers whose invoices are in the books but not in 2B (they haven't
+   * filed, or filed them wrong), with the ITC at stake — the list to chase.
+   * Grouped by GSTIN, or by party name when the books have no GSTIN.
+   * Largest ITC first.
+   */
+  function suppliersToChase(r) {
+    const groups = new Map();
+    r.onlyBooks.concat(r.noGstin).forEach(b => {
+      const key = b.ctin || 'name:' + String(b.party || '').trim().toLowerCase();
+      const g = groups.get(key) || groups.set(key, { ctin: b.ctin, party: b.party, count: 0, itc: 0, taxable: 0, lastDate: null, invoices: [] }).get(key);
+      const sign = b.kind === 'CN' ? -1 : 1;
+      g.count++; g.itc = round2(g.itc + sign * taxOf(b)); g.taxable = round2(g.taxable + sign * b.taxable);
+      if (b.date && (!g.lastDate || b.date > g.lastDate)) g.lastDate = b.date;
+      g.invoices.push(b.no);
+    });
+    return [...groups.values()].sort((a, b) => b.itc - a.itc || b.count - a.count);
+  }
+
   function summarise(r, recs, books) {
     const itc = x => taxOf(x) * (x.kind === 'CN' ? -1 : 1);
     const sum = list => round2(list.reduce((s, x) => s + itc(x), 0));
     return {
       counts: {
         twoB: recs.length, books: books.length,
-        matched: r.matched.length, differs: r.differs.length, probable: r.probable.length,
+        matched: r.matched.length, smartMatched: r.matched.filter(e => e.smart).length, differs: r.differs.length, probable: r.probable.length,
         possible: r.possible.length, only2b: r.only2b.length, onlyBooks: r.onlyBooks.length,
-        noGstin: r.noGstin.length, duplicatesInBooks: r.duplicatesInBooks.length,
+        noGstin: r.noGstin.length, duplicatesInBooks: r.duplicatesInBooks.length, bookedTwice: r.bookedTwice.length,
       },
       itc: {
         in2b: sum(recs.filter(k => k.itcAvailable !== false)),
@@ -313,7 +380,7 @@
     return { ok: true, lines };
   }
 
-  const api = { reconcile, flatten2B, normaliseBooks, normInvoiceNo, parseDate, cleanGstin, isoDate, AMOUNT_TOLERANCE, POSSIBLE_DAY_WINDOW, RATE_SLABS, impliedRate, suggestSplits, splitInvoice };
+  const api = { reconcile, flatten2B, normaliseBooks, normInvoiceNo, invoiceWords, sameInvoiceLoosely, suppliersToChase, parseDate, cleanGstin, isoDate, AMOUNT_TOLERANCE, POSSIBLE_DAY_WINDOW, RATE_SLABS, impliedRate, suggestSplits, splitInvoice };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.BooksRecon = api;
 })(typeof self !== 'undefined' ? self : this);

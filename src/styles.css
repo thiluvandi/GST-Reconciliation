@@ -439,3 +439,6 @@ td.status-mismatch { color: var(--red); font-family: var(--sans); font-weight: 6
   .summary-card.sc-changed, .sc-delta { animation: none; }
   .tp-burst { display: none; }
 }
+
+/* Suppliers to chase: keep the invoice-number list from stretching the table */
+.bk-table td.sup-inv { white-space: normal; min-width: 180px; font-size: 11.5px; color: var(--ink-2); }

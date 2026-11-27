@@ -175,34 +175,75 @@ function renderBooksResult(r) {
     `<div class="summary-card"><div class="sc-label">${esc(label)}</div><div class="sc-value ${cls}">${value}</div><div class="sc-sub">${esc(sub)}</div></div>`;
 
   const cards = [
-    card('Matched', c.matched, `of ${c.books} book entries`, 'match'),
+    card('Matched', c.matched, `of ${c.books} book entries${c.smartMatched ? ` · ${c.smartMatched} by smart matching` : ''}`, 'match'),
     card('Amount differs', c.differs, 'same invoice, different tax', c.differs ? 'mismatch' : 'match'),
     card('Need your check', c.probable + c.possible, `${c.probable} probable · ${c.possible} possible`, (c.probable + c.possible) ? 'mismatch' : 'match'),
     card('In 2B, not in books', c.only2b, `ITC ₹${money(itc.only2b)} not yet booked`, c.only2b ? 'mismatch' : 'match'),
-    card('In books, not in 2B', c.onlyBooks + c.noGstin, `ITC ₹${money(itc.onlyBooks)} supplier hasn't reported`, (c.onlyBooks + c.noGstin) ? 'mismatch' : 'match'),
+    card('In books, not in 2B', c.onlyBooks + c.noGstin, `ITC ₹${money(itc.onlyBooks)} supplier hasn't reported${c.bookedTwice ? ` · ${c.bookedTwice} booked twice` : ''}`, (c.onlyBooks + c.noGstin) ? 'mismatch' : 'match'),
   ].join('');
 
   const probableCols = pairCols.slice(0, 8).concat([{ label: 'Note', get: e => (e.amountsAgree ? '' : 'Amounts differ — ') + (e.note || 'No GSTIN in books') }]);
 
   const html = `
     <div class="summary-grid">${cards}</div>
-    ${r.duplicatesInBooks.length ? `<div class="notice notice-warn" style="margin-bottom:16px"><span>${r.duplicatesInBooks.length} supplier invoice${r.duplicatesInBooks.length === 1 ? ' appears' : 's appear'} more than once in your books (${esc(r.duplicatesInBooks.map(l => l[0].no).join(', '))}) — the extra entries are listed under "In books, not in 2B".</span></div>` : ''}
+    ${section('Booked twice in your books', 'bad', 'The same supplier invoice (same number and amount) is in your books more than once. The first entry matched GSTR-2B; these extra vouchers would claim the ITC twice. Delete them in Tally.',
+      [{ label: 'Extra voucher', get: d => d.books.voucherNo }, { label: 'Party', get: d => d.books.party }, { label: 'Invoice', get: d => d.books.no },
+       { label: 'Date', get: d => dmy(d.books.date) }, { label: 'Tax', num: true, get: d => taxOf(d.books) },
+       { label: 'Already booked as voucher', get: d => `${d.first.voucherNo} (${d.first.party})` }], r.bookedTwice || [])}
+    ${r.duplicatesInBooks.length && !(r.bookedTwice || []).length ? `<div class="notice notice-warn" style="margin-bottom:16px"><span>${r.duplicatesInBooks.length} supplier invoice${r.duplicatesInBooks.length === 1 ? ' appears' : 's appear'} more than once in your books (${esc(r.duplicatesInBooks.map(l => l[0].no).join(', '))}) — the extra entries are listed under "In books, not in 2B".</span></div>` : ''}
     ${section('Amount differs', 'bad', 'Same supplier and invoice in both, but the tax amounts disagree. The difference is books − 2B.', pairCols, r.differs)}
     ${section('Probable matches — no GSTIN in books', 'warn', 'These vouchers have no usable GSTIN, so they were matched on invoice number and amount only. Please confirm each, then add the GSTIN to the party in Tally.', probableCols, r.probable)}
     ${section('Possible matches — invoice number differs', 'warn', 'Same supplier, same amount, close dates, but the invoice number is typed differently.', pairCols, r.possible)}
     ${typeof only2bSectionHTML === 'function'
       ? only2bSectionHTML(r)
       : section('In GSTR-2B, not in books', 'bad', 'The supplier reported these but they are not in your purchase register. ITC can usually only be claimed once they are booked.', only2bCols, r.only2b)}
+    ${suppliersSectionHTML(r)}
     ${section('In books, not in GSTR-2B', 'bad', 'In your purchase register with a GSTIN, but the supplier has not reported them (yet).', onlyBooksCols, r.onlyBooks)}
     ${section('In books, no usable GSTIN, no match', 'warn', 'No valid GSTIN to match on and nothing in 2B fits. May be unregistered suppliers, or a missing GSTIN.', onlyBooksCols, r.noGstin)}
-    ${section('Matched', 'ok', '', pairCols, r.matched, { open: false })}
+    ${section('Matched', 'ok', c.smartMatched ? `${c.smartMatched} matched by smart matching: same GSTIN, same amounts, close dates, and the same invoice number written with an extra prefix or suffix (shown in the Note column).` : '',
+      pairCols.concat([{ label: 'Note', get: e => (e.smart ? 'Smart match' : '') }]), r.matched, { open: false })}
     <div style="margin-top:14px"><button type="button" class="btn-reset" id="btn-books-csv">Download exceptions (CSV)</button></div>`;
 
   const out = document.getElementById('books-results');
   out.innerHTML = html;
   out.style.display = 'block';
   document.getElementById('btn-books-csv').addEventListener('click', downloadBooksCSV);
+  const sup = document.getElementById('btn-suppliers-csv');
+  if (sup) sup.addEventListener('click', downloadSuppliersCSV);
   if (typeof bindOnly2b === 'function') bindOnly2b(r);
+}
+
+// ── Suppliers to chase ──────────────────────────────────────────────────────
+// "In books, not in 2B" grouped by supplier, largest ITC at risk first: the
+// suppliers who haven't filed (or filed wrongly) and should be followed up.
+
+function suppliersSectionHTML(r) {
+  const list = BooksRecon.suppliersToChase(r);
+  if (!list.length) return '';
+  const total = list.reduce((s, g) => s + g.itc, 0);
+  const rows = list.map(g => `<tr>
+    <td>${esc(g.party || '—')}</td><td>${esc(g.ctin || 'No GSTIN in books')}</td>
+    <td class="num">${g.count}</td><td class="num">${money(g.taxable)}</td><td class="num">${money(g.itc)}</td>
+    <td>${esc(dmy(g.lastDate))}</td><td class="sup-inv">${esc(g.invoices.slice(0, 4).join(', '))}${g.invoices.length > 4 ? ` +${g.invoices.length - 4} more` : ''}</td></tr>`).join('');
+  return `<details class="table-wrap bk-details" open>
+    <summary>Suppliers to chase<span class="bk-badge bad">${list.length}</span></summary>
+    <p class="bk-note" style="padding:0 14px">Suppliers whose invoices are in your books but not in GSTR-2B, largest ITC at risk first — ₹${money(total)} in all. Ask them to file (or correct) their GSTR-1; the credit can't be claimed until they do.</p>
+    <div style="overflow-x:auto"><table class="bk-table"><thead><tr>
+      <th>Supplier</th><th>GSTIN</th><th class="num">Invoices</th><th class="num">Taxable</th><th class="num">ITC at risk</th><th>Latest invoice</th><th>Invoice numbers</th>
+    </tr></thead><tbody>${rows}</tbody></table></div>
+    <div style="padding:10px 14px"><button type="button" class="btn-reset" id="btn-suppliers-csv">Download supplier list (CSV)</button></div>
+  </details>`;
+}
+
+function downloadSuppliersCSV() {
+  if (!booksResult) return;
+  const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const lines = [['Supplier', 'GSTIN', 'Invoices', 'Taxable', 'ITC at risk', 'Latest invoice', 'Invoice numbers'].map(q).join(',')];
+  BooksRecon.suppliersToChase(booksResult).forEach(g => lines.push([g.party, g.ctin, g.count, g.taxable, g.itc, dmy(g.lastDate), g.invoices.join(' | ')].map(q).join(',')));
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = 'Suppliers_to_chase.csv'; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
 function downloadBooksCSV() {
@@ -216,6 +257,7 @@ function downloadBooksCSV() {
   r.possible.forEach(e => pair('Possible (invoice no. differs)', e));
   r.only2b.forEach(k => lines.push(['In 2B, not in books', k.party, k.ctin, '', k.no, dmy(k.date), '', taxOf(k), '', ''].map(q).join(',')));
   r.onlyBooks.concat(r.noGstin).forEach(b => lines.push(['In books, not in 2B', b.party, b.ctin || b.gstinRaw, b.no, '', dmy(b.date), taxOf(b), '', '', b.ctin ? '' : 'No usable GSTIN'].map(q).join(',')));
+  (r.bookedTwice || []).forEach(d => lines.push(['Booked twice in books', d.books.party, d.books.ctin || d.books.gstinRaw, d.books.no, '', dmy(d.books.date), taxOf(d.books), '', '', `Extra voucher ${d.books.voucherNo}; first booked as voucher ${d.first.voucherNo}`].map(q).join(',')));
   const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = 'GSTR2B_vs_books_exceptions.csv'; a.click();
