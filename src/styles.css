@@ -442,3 +442,8 @@ td.status-mismatch { color: var(--red); font-family: var(--sans); font-weight: 6
 
 /* Suppliers to chase: keep the invoice-number list from stretching the table */
 .bk-table td.sup-inv { white-space: normal; min-width: 180px; font-size: 11.5px; color: var(--ink-2); }
+
+/* GSTR-1 vs books, month by month */
+.sm-table tr.sm-total td { font-weight: 600; border-bottom: 1.5px solid var(--border); }
+.sm-table td:nth-child(2) { font-family: var(--sans); color: var(--ink-2); text-align: left; }
+.sm-diff { font: 600 11px/1 var(--sans); color: var(--red); }

@@ -143,6 +143,18 @@
     </details>
   </div>
   <div id="books-results" style="display:none"></div>
+
+  <!-- ── GSTR-1 vs sales books ────────────────────────────────────────── -->
+  <div class="section-title" style="margin-top:36px">GSTR-1 vs Sales Books</div>
+  <div class="upload-card" id="card-sales" style="max-width:none">
+    <p class="books-help">Compare the GSTR-1 files loaded above with the sales in your Tally books: invoice by invoice where GSTR-1 lists invoices, and month by month for B2C sales. Nothing is written to Tally.</p>
+    <div class="books-actions">
+      <button type="button" class="btn-run" id="btn-sales-import" disabled>Import sales from Tally</button>
+      <span class="run-hint" id="sales-hint">Load GSTR-1 above, then import your sales from Tally.</span>
+    </div>
+    <div id="sales-notices" class="notice-list"></div>
+  </div>
+  <div id="sales-results" style="display:none"></div>
 </main>
 
 <footer class="site-foot">
@@ -158,5 +170,6 @@
 <script src="src/booksrecon.js"></script>
 <script src="src/books-ui.js"></script>
 <script src="src/tally-ui.js"></script>
+<script src="src/sales-ui.js"></script>
 </body>
 </html>

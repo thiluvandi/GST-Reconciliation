@@ -161,8 +161,15 @@
 
   function reconcile(raw2b, booksRows) {
     const recs = (Array.isArray(raw2b) ? raw2b : [raw2b]).flatMap(flatten2B);
-    const books = normaliseBooks(booksRows);
+    return matchRecords(recs, normaliseBooks(booksRows));
+  }
 
+  /**
+   * The matcher itself, on any return's invoice records (2B for purchases,
+   * GSTR-1 for sales) against normalised book entries. Result buckets keep
+   * their purchase names (only2b = "in the return, not in books").
+   */
+  function matchRecords(recs, books) {
     const used2b = new Set(), usedBooks = new Set();
     const result = { matched: [], differs: [], probable: [], possible: [], only2b: [], onlyBooks: [], noGstin: [], duplicatesInBooks: [] };
 
@@ -256,6 +263,105 @@
 
     result.summary = summarise(result, recs, books);
     return result;
+  }
+
+  // ── Sales: GSTR-1 against the sales books ─────────────────────────────────
+
+  /** Sum an item list's GSTR-1 amounts (txval / iamt / camt / samt / csamt). */
+  function r1Amounts(r) {
+    const its = Array.isArray(r.itms) ? r.itms.map(i => i.itm_det || i) : [r];
+    const s = k => round2(its.reduce((a, i) => a + num(i[k]), 0));
+    return { taxable: s('txval'), igst: s('iamt'), cgst: s('camt'), sgst: s('samt'), cess: s('csamt') };
+  }
+
+  /**
+   * Flatten one GSTR-1 JSON (portal, or the extension's "sections" /
+   * "totals" downloads) into invoice records shaped like 2B ones, plus the
+   * totals that have no invoices: B2CS (small B2C sales are only ever
+   * reported in totals) and, in a totals-only file, the B2B summary.
+   * Amended invoices (b2ba) replace the originals they amend.
+   */
+  function flattenR1(raw) {
+    const d = (raw && raw.data) || raw || {};
+    const fp = String(d.fp || d.ret_period || '');
+    const recs = [];
+    const zero = () => ({ taxable: 0, igst: 0, cgst: 0, sgst: 0, cess: 0 });
+    const add = (t, a, sign = 1) => { Object.keys(t).forEach(k => { t[k] = round2(t[k] + sign * a[k]); }); };
+    const b2cs = zero(), summaryB2B = zero();
+    let summary = false;
+    const amended = new Set();
+    (d.b2ba || []).forEach(c => (c.inv || []).forEach(r => amended.add(`${cleanGstin(c.ctin)}|${normInvoiceNo(r.oinum)}`)));
+    const push = (ctin, r, kind, section, no, dt) => {
+      const a = r1Amounts(r);
+      recs.push({ src: 'r1', kind, ctin, party: '', no: no || '', date: parseDate(dt), ...a,
+        total: r.val !== undefined ? num(r.val) : round2(a.taxable + a.igst + a.cgst + a.sgst + a.cess),
+        itcAvailable: true, reverseCharge: r.rchrg === 'Y', pos: String(r.pos || ''), section, fp });
+    };
+    (d.b2b || []).forEach(c => (c.inv || []).forEach(r => {
+      if (String(c.ctin).toUpperCase() === 'SUMMARY') { summary = true; add(summaryB2B, r1Amounts(r)); return; }
+      const ctin = cleanGstin(c.ctin);
+      if (amended.has(`${ctin}|${normInvoiceNo(r.inum)}`)) return;
+      push(ctin, r, 'INV', 'B2B', r.inum, r.idt);
+    }));
+    (d.b2ba || []).forEach(c => (c.inv || []).forEach(r => push(cleanGstin(c.ctin), r, 'INV', 'B2B', r.inum, r.idt)));
+    (d.b2cl || []).forEach(c => (c.inv || []).forEach(r => push('', { ...r, pos: r.pos || c.pos }, 'INV', 'B2CL', r.inum, r.idt)));
+    (d.exp || []).forEach(c => (c.inv || []).forEach(r => push('', r, 'INV', 'EXP', r.inum, r.idt)));
+    (d.cdnr || []).forEach(c => (c.nt || []).forEach(r => push(cleanGstin(c.ctin), r, r.ntty === 'D' ? 'INV' : 'CN', 'CDNR', r.nt_num, r.nt_dt)));
+    (d.cdnur || []).forEach(r => push('', r, r.ntty === 'D' ? 'INV' : 'CN', 'CDNUR', r.nt_num, r.nt_dt));
+    (d.b2cs || []).forEach(r => add(b2cs, r1Amounts(r)));
+    return { fp, recs, b2cs, summaryB2B, totalsOnly: !!d.totals_only || summary };
+  }
+
+  const fpOfDate = d => (d ? String(d.getUTCMonth() + 1).padStart(2, '0') + d.getUTCFullYear() : '');
+  const fpLabel = fp => { const m = +fp.slice(0, 2), y = fp.slice(2); return m >= 1 && m <= 12 ? `${['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][m - 1]}-${y.slice(2)}` : fp; };
+
+  /**
+   * GSTR-1 files vs sales book rows.
+   *   invoices: invoice-by-invoice result (matchRecords) for the months whose
+   *             GSTR-1 has invoices — B2B, B2CL, exports, credit/debit notes;
+   *   months:   for every month, GSTR-1 vs books totals split into
+   *             registered (B2B) and unregistered (B2C) sales — the only
+   *             possible check for B2CS and for "totals only" downloads.
+   * Book entries outside the GSTR-1 months are ignored.
+   */
+  function reconcileSales(rawR1, salesRows) {
+    const files = (Array.isArray(rawR1) ? rawR1 : [rawR1]).map(flattenR1).filter(f => f.fp);
+    const byFp = new Map(files.map(f => [f.fp, f]));
+    const books = normaliseBooks(salesRows).filter(b => byFp.has(fpOfDate(b.date)));
+    const invoiceMonths = new Set(files.filter(f => !f.totalsOnly).map(f => f.fp));
+    const invoices = matchRecords(files.filter(f => !f.totalsOnly).flatMap(f => f.recs),
+      books.filter(b => invoiceMonths.has(fpOfDate(b.date)) && b.ctin)
+        .concat(books.filter(b => invoiceMonths.has(fpOfDate(b.date)) && !b.ctin)));
+    // B2CL, export and unregistered-note invoices have no GSTIN on either side,
+    // so invoice number + amount (the "probable" tier) is a proper match here.
+    invoices.probable = invoices.probable.filter(e => {
+      if (e.twoB.ctin) return true;
+      (e.amountsAgree ? invoices.matched : invoices.differs).push(e);
+      return false;
+    });
+    // B2C book entries that matched no B2CL/export invoice are B2CS sales: checked in the month totals, not "missing".
+    invoices.b2cBooks = invoices.noGstin; invoices.noGstin = [];
+    Object.assign(invoices.summary.counts, { matched: invoices.matched.length, differs: invoices.differs.length, probable: invoices.probable.length });
+
+    const signed = (x, k) => (x.kind === 'CN' ? -1 : 1) * x[k];
+    const sumOf = (list, k) => round2(list.reduce((s, x) => s + signed(x, k), 0));
+    const pack = list => ({ taxable: sumOf(list, 'taxable'), tax: round2(['igst', 'cgst', 'sgst', 'cess'].reduce((s, k) => s + sumOf(list, k), 0)) });
+    const taxT = t => round2(t.igst + t.cgst + t.sgst + t.cess);
+    const months = files.sort((a, b) => (a.fp.slice(2) + a.fp.slice(0, 2)).localeCompare(b.fp.slice(2) + b.fp.slice(0, 2))).map(f => {
+      const mb = books.filter(b => fpOfDate(b.date) === f.fp);
+      const reg = f.recs.filter(k => k.ctin), unreg = f.recs.filter(k => !k.ctin);
+      const r1 = {
+        b2b: { taxable: round2(sumOf(reg, 'taxable') + f.summaryB2B.taxable), tax: round2(pack(reg).tax + taxT(f.summaryB2B)) },
+        b2c: { taxable: round2(sumOf(unreg, 'taxable') + f.b2cs.taxable), tax: round2(pack(unreg).tax + taxT(f.b2cs)) },
+      };
+      const bk = { b2b: pack(mb.filter(b => b.ctin)), b2c: pack(mb.filter(b => !b.ctin)) };
+      const tot = x => ({ taxable: round2(x.b2b.taxable + x.b2c.taxable), tax: round2(x.b2b.tax + x.b2c.tax) });
+      r1.total = tot(r1); bk.total = tot(bk);
+      const diff = { taxable: round2(bk.total.taxable - r1.total.taxable), tax: round2(bk.total.tax - r1.total.tax) };
+      return { fp: f.fp, label: fpLabel(f.fp), totalsOnly: f.totalsOnly, r1, books: bk, diff,
+        agrees: close(bk.b2b.taxable, r1.b2b.taxable) && close(bk.b2b.tax, r1.b2b.tax) && close(bk.b2c.taxable, r1.b2c.taxable) && close(bk.b2c.tax, r1.b2c.tax) };
+    });
+    return { invoices, months, totalsOnlyMonths: months.filter(m => m.totalsOnly).map(m => m.label), bookCount: books.length };
   }
 
   /**
@@ -380,7 +486,7 @@
     return { ok: true, lines };
   }
 
-  const api = { reconcile, flatten2B, normaliseBooks, normInvoiceNo, invoiceWords, sameInvoiceLoosely, suppliersToChase, parseDate, cleanGstin, isoDate, AMOUNT_TOLERANCE, POSSIBLE_DAY_WINDOW, RATE_SLABS, impliedRate, suggestSplits, splitInvoice };
+  const api = { reconcile, reconcileSales, flattenR1, matchRecords, flatten2B, normaliseBooks, normInvoiceNo, invoiceWords, sameInvoiceLoosely, suppliersToChase, parseDate, cleanGstin, isoDate, AMOUNT_TOLERANCE, POSSIBLE_DAY_WINDOW, RATE_SLABS, impliedRate, suggestSplits, splitInvoice };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.BooksRecon = api;
 })(typeof self !== 'undefined' ? self : this);
