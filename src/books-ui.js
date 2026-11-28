@@ -97,17 +97,18 @@ function setBooks(rows, label, meta) {
 
 function refreshBooksControls() {
   const have2b = Object.keys(files['2b']).length;
+  const periodRows = booksRows.filter(r => !r.lookback);   // earlier months read only to match late invoices don't count
   const run = document.getElementById('btn-books-run');
   const hint = document.getElementById('books-hint');
   run.disabled = !(have2b && booksLoaded);
   const months = `${have2b} GSTR-2B month${have2b === 1 ? '' : 's'}`;
   if (!have2b && !booksLoaded) hint.textContent = 'Load GSTR-2B above, then import your purchase register from Tally.';
-  else if (!have2b) hint.textContent = booksRows.length
-    ? `${booksRows.length} purchase entries loaded from ${booksLabel} — now add GSTR-2B files above.`
+  else if (!have2b) hint.textContent = periodRows.length
+    ? `${periodRows.length} purchase entries loaded from ${booksLabel} — now add GSTR-2B files above.`
     : `${booksLabel} has no purchase entries for that period — now add GSTR-2B files above.`;
   else if (!booksLoaded) hint.textContent = `${months} loaded — now import the purchase register from Tally.`;
-  else if (!booksRows.length) hint.textContent = `${booksLabel} has no purchase entries for that period — every GSTR-2B invoice will be shown as missing from your books.`;
-  else hint.textContent = `${booksRows.length} purchase entries (${booksLabel}) vs ${months} — ready.`;
+  else if (!periodRows.length) hint.textContent = `${booksLabel} has no purchase entries for that period — every GSTR-2B invoice will be shown as missing from your books.`;
+  else hint.textContent = `${periodRows.length} purchase entries (${booksLabel}) vs ${months} — ready.`;
 }
 
 function booksNotice(type, text) {
@@ -200,8 +201,9 @@ function renderBooksResult(r) {
     ${suppliersSectionHTML(r)}
     ${section('In books, not in GSTR-2B', 'bad', 'In your purchase register with a GSTIN, but the supplier has not reported them (yet).', onlyBooksCols, r.onlyBooks)}
     ${section('In books, no usable GSTIN, no match', 'warn', 'No valid GSTIN to match on and nothing in 2B fits. May be unregistered suppliers, or a missing GSTIN.', onlyBooksCols, r.noGstin)}
-    ${section('Matched', 'ok', c.smartMatched ? `${c.smartMatched} matched by smart matching: same GSTIN, same amounts, close dates, and the same invoice number written with an extra prefix or suffix (shown in the Note column).` : '',
-      pairCols.concat([{ label: 'Note', get: e => (e.smart ? 'Smart match' : '') }]), r.matched, { open: false })}
+    ${section('Matched', 'ok', [c.smartMatched ? `${c.smartMatched} matched by smart matching: same GSTIN, same amounts, close dates, and the same invoice number written with an extra prefix or suffix (shown in the Note column).` : '',
+      r.lookbackMatched ? `${r.lookbackMatched} late invoice${r.lookbackMatched === 1 ? ' was' : 's were'} found booked in an earlier month (see Note).` : ''].filter(Boolean).join(' '),
+      pairCols.concat([{ label: 'Note', get: e => [e.smart ? 'Smart match' : '', e.books.lookback ? e.note.replace(/^.*?(Booked in an earlier month)/, '$1') : ''].filter(Boolean).join('; ') }]), r.matched, { open: false })}
     <div style="margin-top:14px"><button type="button" class="btn-reset" id="btn-books-csv">Download exceptions (CSV)</button></div>`;
 
   const out = document.getElementById('books-results');

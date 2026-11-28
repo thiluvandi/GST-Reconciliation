@@ -147,6 +147,18 @@ function twoBGstins() {
   }).filter(Boolean))];
 }
 
+/** The month to start reading Tally from: the earliest 2B invoice date if before `from`, at most 18 months back. */
+const LOOKBACK_MONTHS = 18;
+function lookbackFrom(from) {
+  const dates = Object.values(files['2b'] || {}).flatMap(f => BooksRecon.flatten2B(f.data))
+    .map(k => BooksRecon.isoDate(k.date).slice(0, 7)).filter(Boolean).sort();
+  if (!dates.length || dates[0] >= from) return from;
+  const [y, m] = from.split('-').map(Number);
+  const back = m - 1 - LOOKBACK_MONTHS;
+  const limit = `${y + Math.floor(back / 12)}-${String(((back % 12) + 12) % 12 + 1).padStart(2, '0')}`;
+  return dates[0] < limit ? limit : dates[0];
+}
+
 async function importFromTally() {
   const btn = document.getElementById('btn-tally-import');
   const from = document.getElementById('tally-from').value;
@@ -161,10 +173,20 @@ async function importFromTally() {
     if (!versionAtLeast(ext.version, MIN_EXT_VERSION)) {
       throw new Error(`The GSTR extension (v${ext.version}) is too old — update to v${MIN_EXT_VERSION} or later.`);
     }
-    const data = dropRepeatedTallyRows(await tallyRequest('fetchBooks', { from, to }, 10 * 60 * 1000));
+    // Late invoices (dated before the period) may be booked in an earlier
+    // month: read back to the earliest 2B invoice date, at most 18 months,
+    // and use those earlier entries only to match.
+    const readFrom = lookbackFrom(from);
+    const data = dropRepeatedTallyRows(await tallyRequest('fetchBooks', { from: readFrom, to }, 10 * 60 * 1000));
+    const before = r => String(r.voucherDate || r.date || '').slice(0, 7) < from;
+    data.rows = data.rows.map(r => (before(r) ? Object.assign({}, r, { lookback: true }) : r));
     const company = (data.companies || [])[0] || '';
-    const meta = { company, companyGstins: data.companyGstins || [] };
+    const meta = { company, companyGstins: data.companyGstins || [], lookbackFrom: readFrom < from ? readFrom : '' };
     setBooks(data.rows, `Tally – ${company || 'open company'}`, meta);
+    if (meta.lookbackFrom) {
+      const n = data.rows.filter(r => r.lookback).length;
+      booksNotice('info', `Some GSTR-2B invoices are dated before ${from}, so Tally was also read from ${meta.lookbackFrom} (${n} entr${n === 1 ? 'y' : 'ies'}). Those earlier entries are used only to match late invoices; the rest are left out.`);
+    }
     const mine = twoBGstins();
     if (!data.rows.length) {
       // An empty register is a valid starting point: every 2B invoice is then
@@ -441,12 +463,32 @@ const looksRateWise =ledgers => ledgers.some(l => /(cgst|sgst|igst|purchase)[^%]
 
 // ── The push panel: settings → preview → confirm → results ─────────────────
 
+/**
+ * The voucher date for a 2B invoice. An invoice dated before its 2B month
+ * (Aqua 019: 15 Sep, in October's 2B) is booked on the last day of the 2B
+ * month, so Tally puts the ITC where 2B does; the invoice date stays as the
+ * supplier's reference date. Extensions before 1.13.2 can't send a separate
+ * reference date, so with those the invoice date is kept.
+ */
+const LATE_DATE_VERSION = '1.13.2';
+const isoToDmy = s => String(s || '').split('-').reverse().join('-');
+function voucherDates(k) {
+  const inv = BooksRecon.isoDate(k.date);
+  const fp = k.fp || '';
+  if (!inv || fp.length !== 6 || !versionAtLeast(ext.version, LATE_DATE_VERSION)) return { date: inv };
+  const y = +fp.slice(2), m = +fp.slice(0, 2);
+  const monthOf2b = `${y}-${fp.slice(0, 2)}`;
+  if (inv.slice(0, 7) >= monthOf2b) return { date: inv };
+  const last = `${monthOf2b}-${String(new Date(Date.UTC(y, m, 0)).getUTCDate()).padStart(2, '0')}`;
+  return { date: last, refDate: inv };
+}
+
 function selectedVouchers() {
   return [...pushSel].sort((a, b) => a - b).map(i => {
     const k = pushRows[i];
     const lines = pushSplit[i] || (k._rate === null ? null : [{ rate: k._rate, taxable: k.taxable, igst: k.igst, cgst: k.cgst, sgst: k.sgst, cess: k.cess }]);
     return {
-      _row: i, date: BooksRecon.isoDate(k.date), invoiceNo: k.no, party: k.party, gstin: k.ctin, pos: k.pos,
+      _row: i, ...voucherDates(k), invoiceNo: k.no, party: k.party, gstin: k.ctin, pos: k.pos,
       taxable: k.taxable, igst: k.igst, cgst: k.cgst, sgst: k.sgst, cess: k.cess, kind: k.kind, lines,
       partyLedger: canCreateLedgers() ? (partyOverrides[i] || '') : '',
     };
@@ -743,6 +785,11 @@ async function refreshPreview() {
         <div class="summary-card"><div class="sc-label">Input tax booked</div><div class="sc-value">₹${money(vouchers.reduce((s, v) => s + (v.kind === 'CN' ? -1 : 1) * (v.igst + v.cgst + v.sgst + v.cess), 0))}</div><div class="sc-sub">net of debit notes</div></div>
       </div>
       ${problems.map(t => `<div class="notice notice-error" style="margin-bottom:10px"><span>${esc(t)}</span></div>`).join('')}
+      ${(() => {
+        const late = vouchers.filter((v, i) => v.refDate && !already.some(a => a.index === i));
+        return late.length ? `<div class="notice notice-info" style="margin-bottom:10px"><span>Dated before their GSTR-2B month, so booked on the last day of that month (the supplier's invoice date is kept as the reference date): ${
+          late.map(v => `<b>${esc(v.invoiceNo)}</b> on ${esc(isoToDmy(v.date))} (invoice ${esc(isoToDmy(v.refDate))})`).join(', ')}.</span></div>` : '';
+      })()}
       ${already.length ? `<div class="notice notice-warn" style="margin-bottom:10px"><span>Already in Tally, so they will be skipped (not booked twice): ${
         already.map(a => `<b>${esc(a.invoiceNo)}</b> (voucher ${esc(a.voucherNo)}, ${esc(a.party)})`).join(', ')}.</span></div>` : ''}
       ${toCreate.length ? `<div class="notice notice-warn" style="margin-bottom:10px"><span>These ledgers are not in Tally and will be created: ${

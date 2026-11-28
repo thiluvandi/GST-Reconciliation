@@ -100,11 +100,12 @@
     const inner = (raw && raw.data) || raw || {};
     const doc = inner.docdata || {};
     const out = [];
+    const fp = portalFp(inner.rtnprd || inner.retPrd || (raw && (raw.rtnprd || raw.retPrd)));   // the 2B month, MMYYYY
 
     const pushInv = (sup, r, kind) => {
       const taxable = amt(r, 'txval'), igst = amt(r, 'igst'), cgst = amt(r, 'cgst'), sgst = amt(r, 'sgst'), cess = amt(r, 'cess');
       out.push({
-        src: '2b', kind,
+        src: '2b', kind, fp,
         ctin: cleanGstin(sup.ctin), party: sup.trdnm || '',
         no: kind === 'INV' ? (r.inum || r.docnum || '') : (r.ntnum || ''),
         date: parseDate(r.dt || r.docdt),
@@ -137,6 +138,8 @@
         taxable, igst, cgst, sgst, cess,
         total: r.total !== undefined && r.total !== '' ? num(r.total) : round2(taxable + igst + cgst + sgst + cess),
         gstinRaw: r.gstin || '',
+        voucherDate: parseDate(r.voucherDate) || null,   // books month, when the source gives it (Tally 1.13.2+)
+        lookback: !!r.lookback,
       };
     });
   }
@@ -159,9 +162,27 @@
 
   // ── The matcher ───────────────────────────────────────────────────────────
 
+  /**
+   * Book rows flagged `lookback` come from months before the period chosen,
+   * read only so a late invoice booked earlier (e.g. on its own September
+   * date, for October's 2B) still finds its book entry. They are kept only
+   * when they pair with a 2B invoice; the rest are not this period's business
+   * and never show as "in books, not in 2B".
+   */
   function reconcile(raw2b, booksRows) {
     const recs = (Array.isArray(raw2b) ? raw2b : [raw2b]).flatMap(flatten2B);
-    return matchRecords(recs, normaliseBooks(booksRows));
+    const rows = booksRows || [];
+    if (!rows.some(r => r && r.lookback)) return matchRecords(recs, normaliseBooks(rows));
+    const first = matchRecords(recs, normaliseBooks(rows));
+    const paired = new Set(first.matched.concat(first.differs, first.probable, first.possible).map(e => e.books.idx));
+    const r = matchRecords(recs, normaliseBooks(rows.filter((row, i) => !row.lookback || paired.has(i))));
+    r.matched.concat(r.differs, r.probable, r.possible).forEach(e => {
+      if (!e.books.lookback) return;
+      const when = isoDate(e.books.voucherDate || e.books.date).split('-').reverse().join('-');
+      e.note = [e.note, `Booked in an earlier month (voucher ${e.books.voucherNo || ''} dated ${when})`].filter(Boolean).join('; ');
+    });
+    r.lookbackMatched = r.matched.concat(r.differs, r.probable, r.possible).filter(e => e.books.lookback).length;
+    return r;
   }
 
   /**
@@ -432,7 +453,7 @@
     const want = new Set(fps);
     const booksByFp = new Map();
     if (haveBooks) normaliseBooks(booksRows).forEach(b => {
-      const fp = fpOfDate(b.date);
+      const fp = fpOfDate(b.voucherDate || b.date);   // the month the books carry the ITC in
       if (!want.has(fp)) return;
       addHeads(booksByFp.get(fp) || booksByFp.set(fp, zeroHeads()).get(fp), b, b.kind === 'CN' ? -1 : 1);
     });
